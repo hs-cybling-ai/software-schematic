@@ -225,9 +225,29 @@ impl LocalCliProvider {
                 })?
         };
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("invalid_json_schema") {
+                return Err(Error::Message(
+                    "Codex rejected the Software Schematic operation schema; update SSW to a compatible release"
+                        .into(),
+                ));
+            }
+            if stderr.contains("401")
+                || stderr.to_ascii_lowercase().contains("not logged in")
+                || stderr.to_ascii_lowercase().contains("authentication")
+            {
+                return Err(Error::Message(format!(
+                    "{} is not authenticated; run ./ssw auth login --provider {}",
+                    self.kind, self.kind
+                )));
+            }
             return Err(Error::Message(format!(
-                "{} assistant is not authenticated or could not generate a proposal; run ./ssw auth status",
-                self.kind
+                "{} could not generate a proposal (exit status {}); run ./ssw auth status and retry",
+                self.kind,
+                output
+                    .status
+                    .code()
+                    .map_or_else(|| "unknown".into(), |code| code.to_string())
             )));
         }
         if output.stdout.len() > MAX_RESPONSE_BYTES {
@@ -510,6 +530,16 @@ fn confined_path(path: &str) -> Result<()> {
 }
 
 pub fn operation_plan_schema() -> Value {
+    fn operation(required: &[&str], properties: Value) -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": required,
+            "properties": properties
+        })
+    }
+    let diagram_path = json!({"type": "string"});
+    let node_id = json!({"type": "string"});
     json!({
         "type": "object", "additionalProperties": false,
         "required": ["version", "requestId", "sourceRevision", "summary", "assumptions", "warnings", "operations"],
@@ -518,10 +548,17 @@ pub fn operation_plan_schema() -> Value {
             "requestId": {"type": "string"}, "sourceRevision": {"type": "string"}, "summary": {"type": "string"},
             "assumptions": {"type": "array", "items": {"type": "string"}},
             "warnings": {"type": "array", "items": {"type": "string"}},
-            "operations": {"type": "array", "maxItems": MAX_OPERATIONS, "items": {
-                "type": "object", "additionalProperties": true, "required": ["type"],
-                "properties": {"type": {"type": "string", "enum": ["replace_node_type", "update_node_label", "set_composition_link", "create_composition", "open_composition", "add_flow_node", "connect_sequence_flow", "replace_diagram_markdown", "replace_node_markdown"]}}
-            }}
+            "operations": {"type": "array", "maxItems": MAX_OPERATIONS, "items": {"anyOf": [
+                operation(&["type", "diagramPath", "nodeId", "bpmnType"], json!({"type":{"type":"string","const":"replace_node_type"},"diagramPath":diagram_path,"nodeId":node_id,"bpmnType":{"type":"string"}})),
+                operation(&["type", "diagramPath", "nodeId", "label"], json!({"type":{"type":"string","const":"update_node_label"},"diagramPath":diagram_path,"nodeId":node_id,"label":{"type":"string"}})),
+                operation(&["type", "diagramPath", "nodeId", "path"], json!({"type":{"type":"string","const":"set_composition_link"},"diagramPath":diagram_path,"nodeId":node_id,"path":{"type":"string"}})),
+                operation(&["type", "path"], json!({"type":{"type":"string","const":"create_composition"},"path":{"type":"string"}})),
+                operation(&["type", "path"], json!({"type":{"type":"string","const":"open_composition"},"path":{"type":"string"}})),
+                operation(&["type", "diagramPath", "nodeId", "bpmnType", "label", "x", "y"], json!({"type":{"type":"string","const":"add_flow_node"},"diagramPath":diagram_path,"nodeId":node_id,"bpmnType":{"type":"string"},"label":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"}})),
+                operation(&["type", "diagramPath", "flowId", "sourceId", "targetId"], json!({"type":{"type":"string","const":"connect_sequence_flow"},"diagramPath":diagram_path,"flowId":{"type":"string"},"sourceId":{"type":"string"},"targetId":{"type":"string"}})),
+                operation(&["type", "diagramPath", "markdown"], json!({"type":{"type":"string","const":"replace_diagram_markdown"},"diagramPath":diagram_path,"markdown":{"type":"string"}})),
+                operation(&["type", "diagramPath", "nodeId", "markdown"], json!({"type":{"type":"string","const":"replace_node_markdown"},"diagramPath":diagram_path,"nodeId":node_id,"markdown":{"type":"string"}}))
+            ]}}
         }
     })
 }
@@ -572,5 +609,29 @@ mod tests {
         let mut unsupported = plan;
         unsupported.operations[0]["type"] = json!("shell");
         assert!(validate_plan(&unsupported, &request()).is_err());
+    }
+
+    #[test]
+    fn operation_schema_uses_closed_strict_variants() {
+        let schema = operation_plan_schema();
+        let variants = schema
+            .pointer("/properties/operations/items/anyOf")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(variants.len(), 9);
+        assert!(
+            variants
+                .iter()
+                .all(|variant| variant["additionalProperties"] == false)
+        );
+        assert!(variants.iter().all(|variant| {
+            let required = variant["required"].as_array().unwrap();
+            variant["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|key| required.iter().any(|value| value == key))
+        }));
     }
 }

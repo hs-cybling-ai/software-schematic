@@ -76,6 +76,10 @@ describe('browser workspace contract', () => {
     expect(main).toContain("gfx?.setAttribute('aria-label'");
   });
 
+  it('keeps the assistant modal above BPMN palettes and context pads', () => {
+    expect(css).toMatch(/\.modal-backdrop\s*\{[^}]*z-index:\s*10000/);
+  });
+
   it('auto-places flow nodes with half an activity width between them', () => {
     expect(main).toContain('const DEFAULT_ACTIVITY_WIDTH = 100');
     expect(main).toContain('const DEFAULT_NODE_GAP = DEFAULT_ACTIVITY_WIDTH / 2');
