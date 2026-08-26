@@ -1,0 +1,1 @@
+User clicked the start button.

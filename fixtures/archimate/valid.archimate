@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<model xmlns="http://www.opengroup.org/xsd/archimate/3.0/" identifier="model-1">
+  <name xml:lang="en">Example Architecture</name>
+  <elements><element identifier="element-1" xsi:type="ApplicationComponent" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><name xml:lang="en">Application</name></element></elements>
+  <views><diagrams><view identifier="view-1" xsi:type="Diagram" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><name xml:lang="en">Overview</name></view></diagrams></views>
+</model>

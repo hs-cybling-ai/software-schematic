@@ -1,0 +1,14 @@
+{
+  "format": "diagram-studio/data-graph",
+  "version": 2,
+  "nodes": [],
+  "edges": [],
+  "properties": [],
+  "contextStore": {
+    "kind": "sqlite",
+    "uri": "diagram.context.sqlite",
+    "schemaVersion": 1,
+    "diagramId": "starter-diagram",
+    "revision": 0
+  }
+}

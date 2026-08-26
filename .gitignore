@@ -1,0 +1,15 @@
+.build/
+.ss/
+DerivedData/
+web-editor/node_modules/
+**/node_modules/
+**/target/
+**/dist/
+*.xcuserstate
+xcuserdata/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.pem
+*.key

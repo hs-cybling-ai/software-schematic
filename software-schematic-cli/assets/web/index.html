@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Software Schematic</title>
+    <script type="module" crossorigin src="./vendor/index-CsBMms0g.js"></script>
+    <link rel="stylesheet" crossorigin href="./vendor/index-NX7Ln-jw.css">
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <header class="topbar">
+        <div class="brand"><span class="brand-mark">SS</span><span>Software Schematic</span></div>
+        <div class="topbar-actions">
+          <button id="fit-view" class="icon-button" title="Enter full screen" aria-label="Enter full screen" aria-pressed="false"><i data-lucide="maximize-2"></i></button>
+          <div id="save-status" class="save-status saved" role="status"><span class="status-dot"></span><span>Saved</span></div>
+        </div>
+      </header>
+      <main class="workspace">
+        <section class="diagram-panel" aria-label="Diagram editor">
+          <div id="tabs" class="tabs" role="tablist"></div>
+          <nav id="breadcrumbs" class="breadcrumbs" aria-label="Composition breadcrumb"></nav>
+          <div id="canvases" class="canvases"></div>
+        </section>
+        <aside class="inspector" aria-label="Metadata and documentation">
+          <section class="metadata-card">
+            <div class="eyebrow">Selection</div>
+            <div class="field-grid">
+              <label class="field field-id"><span>ID</span><input id="element-id" autocomplete="off" /></label>
+              <label class="field"><span>Type</span><input id="element-type" readonly /></label>
+              <label class="field field-wide"><span>Label</span><input id="element-label" autocomplete="off" /></label>
+              <label class="field field-wide"><span>Documentation</span><input id="documentation-path" readonly /></label>
+              <label id="node-status-field" class="field field-wide hidden"><span>LLM status</span><select id="node-status"><option value="open">Open</option><option value="new">New</option><option value="locked">Locked</option><option value="modify">Modify</option></select><small id="node-status-meaning"></small></label>
+              <label id="called-element-field" class="field field-wide hidden"><span>External process</span><input id="called-element" placeholder="order" autocomplete="off" /></label>
+            </div>
+            <button id="open-composition" class="secondary-button hidden"><i data-lucide="external-link"></i><span>Open composition</span></button>
+          </section>
+          <section class="documentation-card">
+            <div class="documentation-header">
+              <div><div class="eyebrow">Documentation</div><h1 id="documentation-title">Main flow</h1></div>
+              <button id="toggle-markdown" class="icon-button" title="Edit Markdown" aria-label="Edit Markdown"><i data-lucide="pencil-line"></i></button>
+            </div>
+            <div id="markdown-rendered" class="markdown-body"></div>
+            <textarea id="markdown-source" class="markdown-source hidden" spellcheck="true" aria-label="Markdown source"></textarea>
+          </section>
+        </aside>
+      </main>
+      <div id="toast" class="toast hidden" role="alert"></div>
+    </div>
+  </body>
+</html>
