@@ -812,6 +812,12 @@ mod tests {
                 .is_file()
         );
         assert!(directory.path().join("schematics/order/main.md").is_file());
+        let diagram =
+            fs::read_to_string(directory.path().join("schematics/order/main.bpmn")).unwrap();
+        assert!(!diagram.contains("<bpmn:startEvent"));
+        assert!(!diagram.contains("<bpmn:task"));
+        assert!(!diagram.contains("<bpmn:sequenceFlow"));
+        assert!(!diagram.contains("<bpmndi:BPMNShape"));
     }
 
     #[tokio::test]
