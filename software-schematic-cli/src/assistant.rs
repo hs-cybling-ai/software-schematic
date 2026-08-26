@@ -159,7 +159,7 @@ impl LocalCliProvider {
     fn run(&self, request: &AssistantRequest) -> Result<AssistantResult> {
         let schema = operation_plan_schema();
         let prompt = format!(
-            "Return only a Software Schematic operation plan matching the supplied JSON schema. Do not inspect files, run tools, or mutate anything. Preserve requestId={} and sourceRevision={}. User request: {}\nContext: {}",
+            "Return only a Software Schematic operation plan matching the supplied JSON schema. Do not inspect files, run tools, or mutate anything. Preserve requestId={} and sourceRevision={}. Every path must be non-empty and relative to the schematics directory: use main.bpmn or a composition slug such as checkout/main.bpmn, never an absolute path and never a schematics/ prefix. When a requested child flow needs a new composition and none is named, choose a short slug from the selected node label. Interpret system task as bpmn:ServiceTask. Emit each intended operation only once. User request: {}\nContext: {}",
             request.request_id,
             request.snapshot["sourceRevision"]
                 .as_str()
@@ -380,7 +380,7 @@ pub async fn generate(
             "deterministic-v1".into()
         }
     });
-    let result = match provider.as_str() {
+    let mut result = match provider.as_str() {
         "fake" => FakeProvider::new(model).propose(request).await?,
         "openai" => {
             let key = env::var("OPENAI_API_KEY").map_err(|_| Error::Message("OpenAI assistance is not configured; set OPENAI_API_KEY in the host environment".into()))?;
@@ -401,8 +401,27 @@ pub async fn generate(
             ));
         }
     };
+    canonicalize_plan_paths(&mut result.proposal)?;
     validate_plan(&result.proposal, request)?;
     Ok(result)
+}
+
+fn canonicalize_plan_paths(plan: &mut AssistantPlan) -> Result<()> {
+    for operation in &mut plan.operations {
+        for field in ["path", "diagramPath"] {
+            let Some(raw) = operation[field].as_str() else {
+                continue;
+            };
+            let trimmed = raw.trim();
+            let normalized = trimmed
+                .strip_prefix("/schematics/")
+                .or_else(|| trimmed.strip_prefix("schematics/"))
+                .unwrap_or(trimmed);
+            confined_path(normalized)?;
+            operation[field] = json!(normalized);
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_request(request: &AssistantRequest) -> Result<()> {
@@ -538,7 +557,13 @@ pub fn operation_plan_schema() -> Value {
             "properties": properties
         })
     }
-    let diagram_path = json!({"type": "string"});
+    let assistant_path = json!({
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[^/\\\\].*$",
+        "description": "A non-empty path relative to the schematics directory, without a schematics/ prefix."
+    });
+    let diagram_path = assistant_path.clone();
     let node_id = json!({"type": "string"});
     json!({
         "type": "object", "additionalProperties": false,
@@ -551,9 +576,9 @@ pub fn operation_plan_schema() -> Value {
             "operations": {"type": "array", "maxItems": MAX_OPERATIONS, "items": {"anyOf": [
                 operation(&["type", "diagramPath", "nodeId", "bpmnType"], json!({"type":{"type":"string","const":"replace_node_type"},"diagramPath":diagram_path,"nodeId":node_id,"bpmnType":{"type":"string"}})),
                 operation(&["type", "diagramPath", "nodeId", "label"], json!({"type":{"type":"string","const":"update_node_label"},"diagramPath":diagram_path,"nodeId":node_id,"label":{"type":"string"}})),
-                operation(&["type", "diagramPath", "nodeId", "path"], json!({"type":{"type":"string","const":"set_composition_link"},"diagramPath":diagram_path,"nodeId":node_id,"path":{"type":"string"}})),
-                operation(&["type", "path"], json!({"type":{"type":"string","const":"create_composition"},"path":{"type":"string"}})),
-                operation(&["type", "path"], json!({"type":{"type":"string","const":"open_composition"},"path":{"type":"string"}})),
+                operation(&["type", "diagramPath", "nodeId", "path"], json!({"type":{"type":"string","const":"set_composition_link"},"diagramPath":diagram_path,"nodeId":node_id,"path":assistant_path})),
+                operation(&["type", "path"], json!({"type":{"type":"string","const":"create_composition"},"path":assistant_path})),
+                operation(&["type", "path"], json!({"type":{"type":"string","const":"open_composition"},"path":assistant_path})),
                 operation(&["type", "diagramPath", "nodeId", "bpmnType", "label", "x", "y"], json!({"type":{"type":"string","const":"add_flow_node"},"diagramPath":diagram_path,"nodeId":node_id,"bpmnType":{"type":"string"},"label":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"}})),
                 operation(&["type", "diagramPath", "flowId", "sourceId", "targetId"], json!({"type":{"type":"string","const":"connect_sequence_flow"},"diagramPath":diagram_path,"flowId":{"type":"string"},"sourceId":{"type":"string"},"targetId":{"type":"string"}})),
                 operation(&["type", "diagramPath", "markdown"], json!({"type":{"type":"string","const":"replace_diagram_markdown"},"diagramPath":diagram_path,"markdown":{"type":"string"}})),
@@ -633,5 +658,24 @@ mod tests {
                 .keys()
                 .all(|key| required.iter().any(|value| value == key))
         }));
+    }
+
+    #[test]
+    fn provider_paths_are_canonicalized_before_validation() {
+        let mut plan = AssistantPlan {
+            version: "1.0".into(),
+            request_id: "request-1".into(),
+            source_revision: "abc".into(),
+            summary: "x".into(),
+            assumptions: vec![],
+            warnings: vec![],
+            operations: vec![
+                json!({"type":"create_composition","path":" /schematics/cybling-setup "}),
+            ],
+        };
+        canonicalize_plan_paths(&mut plan).unwrap();
+        assert_eq!(plan.operations[0]["path"], "cybling-setup");
+        plan.operations[0]["path"] = json!("");
+        assert!(canonicalize_plan_paths(&mut plan).is_err());
     }
 }
