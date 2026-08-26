@@ -6,6 +6,7 @@ import DOMPurify from 'dompurify';
 import mermaid from 'mermaid';
 import { createIcons, BookOpen, ExternalLink, Maximize2, Minimize2, PencilLine, X } from 'lucide';
 import { compositionBreadcrumbs, compositionIdentity, compositionPathFor, compositionSlug, documentationPath, isRootDiagram, NODE_STATUSES, normalizeCompositionPath, normalizeNodeStatus, projectDocumentTitle, RevisionQueue } from './core.js';
+import { buildContextSnapshot, isAssistantEligible, proposalGroups, stableRevision, validateProposal } from './assistant.js';
 import './styles.css';
 
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
@@ -46,6 +47,10 @@ CompositionAutoPlaceProvider.$inject = ['eventBus'];
 
 function CompositionPaletteProvider(palette, canvas, elementFactory, modeling) {
   this.getPaletteEntries = () => ({
+    'ai.diagram-assistant': {
+      group: 'tools', className: 'ai-assistant-entry', title: 'Suggest changes to the complete diagram',
+      action: { click: (event) => window.dispatchEvent(new CustomEvent('ssw:assistant', { detail: { scope: 'diagram', invoker: event.currentTarget || event.target?.closest?.('.entry') || event.target } })) },
+    },
     'create.participant-expanded': {
       group: 'collaboration',
       className: 'bpmn-icon-participant',
@@ -75,10 +80,22 @@ function CompositionPaletteProvider(palette, canvas, elementFactory, modeling) {
 }
 CompositionPaletteProvider.$inject = ['palette', 'canvas', 'elementFactory', 'modeling'];
 
+function AssistantContextPadProvider(contextPad) {
+  this.getContextPadEntries = (element) => isAssistantEligible(element) ? {
+    'ai.node-assistant': {
+      group: 'edit', className: 'ai-assistant-entry', title: `Suggest changes for ${businessLabel(element)}`,
+      action: { click: (event) => window.dispatchEvent(new CustomEvent('ssw:assistant', { detail: { scope: 'node', elementId: element.id, invoker: event.currentTarget || event.target?.closest?.('.entry') || event.target } })) },
+    },
+  } : {};
+  contextPad.registerProvider(500, this);
+}
+AssistantContextPadProvider.$inject = ['contextPad'];
+
 const compositionPaletteModule = {
-  __init__: ['compositionPaletteProvider', 'compositionAutoPlaceProvider'],
+  __init__: ['compositionPaletteProvider', 'compositionAutoPlaceProvider', 'assistantContextPadProvider'],
   compositionPaletteProvider: ['type', CompositionPaletteProvider],
   compositionAutoPlaceProvider: ['type', CompositionAutoPlaceProvider],
+  assistantContextPadProvider: ['type', AssistantContextPadProvider],
 };
 
 async function api(path, options = {}) {
@@ -149,6 +166,19 @@ function businessLabel(element) {
   return business?.name || business?.id || business?.$type?.replace('bpmn:', '') || 'Diagram node';
 }
 
+function enhanceAssistantEntries(container) {
+  container.querySelectorAll('.ai-assistant-entry').forEach((entry) => {
+    entry.setAttribute('role', 'button');
+    entry.setAttribute('tabindex', '0');
+    entry.setAttribute('aria-label', entry.title || 'AI diagram assistant');
+    if (entry.dataset.keyboardReady) return;
+    entry.dataset.keyboardReady = 'true';
+    entry.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); entry.click(); }
+    });
+  });
+}
+
 async function openDiagram(path) {
   if (tabs.has(path)) return activateTab(tabs.get(path));
   const xml = await readFile(path);
@@ -158,6 +188,7 @@ async function openDiagram(path) {
   $('#canvases').append(container);
   const modeler = new Modeler({ container, additionalModules: [compositionPaletteModule] });
   await modeler.importXML(xml);
+  enhanceAssistantEntries(container);
   const tabElement = document.createElement('div');
   tabElement.className = 'tab';
   const tabButton = document.createElement('button');
@@ -186,6 +217,7 @@ async function openDiagram(path) {
   tabs.set(path, tab);
 
   const eventBus = modeler.get('eventBus');
+  eventBus.on('contextPad.open', () => globalThis.requestAnimationFrame(() => enhanceAssistantEntries(container)));
   container.addEventListener('click', (event) => {
     const button = event.target.closest?.('.bjs-drilldown');
     if (!button) return;
@@ -357,6 +389,174 @@ async function updateBusinessProperty(property, value) {
   if (!selectedElement) return;
   activeTab.modeler.get('modeling').updateProperties(selectedElement, { [property]: value || undefined });
 }
+
+const assistant = { scope: null, element: null, invoker: null, controller: null, snapshot: null, proposal: null, lastBeforeState: null };
+
+function assistantError(message = '') {
+  const control = $('#assistant-error');
+  control.textContent = message;
+  control.classList.toggle('hidden', !message);
+}
+
+function closeAssistant() {
+  assistant.controller?.abort();
+  assistant.controller = null;
+  assistant.proposal = null;
+  $('#assistant-modal').classList.add('hidden');
+  const invoker = assistant.invoker;
+  assistant.invoker = null;
+  invoker?.focus?.();
+}
+
+function openAssistant({ scope, elementId, invoker }) {
+  const element = elementId ? activeTab?.modeler.get('elementRegistry').get(elementId) : null;
+  if (scope === 'node' && !isAssistantEligible(element)) return;
+  assistant.scope = scope;
+  assistant.element = element;
+  assistant.invoker = invoker || document.activeElement;
+  assistant.snapshot = null;
+  assistant.proposal = null;
+  assistantError();
+  $('#assistant-preview').classList.add('hidden');
+  $('#assistant-preview').replaceChildren();
+  $('#assistant-submit').classList.remove('hidden');
+  $('#assistant-approve').classList.add('hidden');
+  $('#assistant-reject').classList.add('hidden');
+  $('#assistant-prompt').value = '';
+  $('#assistant-scope').textContent = scope === 'node' ? `Node: ${businessLabel(element)} in ${compositionIdentity(activeTab.path).displayPath}` : `Complete diagram: ${compositionIdentity(activeTab.path).displayPath}`;
+  $('#assistant-modal').classList.remove('hidden');
+  $('#assistant-prompt').focus();
+}
+
+window.addEventListener('ssw:assistant', (event) => openAssistant(event.detail));
+$('#assistant-close').addEventListener('click', closeAssistant);
+$('#assistant-cancel').addEventListener('click', closeAssistant);
+$('#assistant-modal').addEventListener('click', (event) => { if (event.target === $('#assistant-modal')) closeAssistant(); });
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !$('#assistant-modal').classList.contains('hidden')) closeAssistant(); });
+
+async function currentAssistantSnapshot() {
+  await flushDiagram(activeTab);
+  await flushMarkdown();
+  const diagramDoc = documentationPath(activeTab.path);
+  const nodeDoc = assistant.element ? documentationPath(activeTab.path, assistant.element.id) : '';
+  const snapshot = await buildContextSnapshot({
+    scope: assistant.scope, tab: activeTab, primaryNode: assistant.element,
+    diagramMarkdown: await readFile(diagramDoc, true),
+    nodeMarkdown: nodeDoc ? await readFile(nodeDoc, true) : '',
+    flush: async () => {},
+  });
+  return snapshot;
+}
+
+function renderProposal(proposal) {
+  const preview = $('#assistant-preview');
+  preview.replaceChildren();
+  const title = document.createElement('h3'); title.textContent = proposal.summary || 'Suggested changes'; preview.append(title);
+  for (const [path, descriptions] of proposalGroups(proposal)) {
+    const heading = document.createElement('h4'); heading.textContent = path; preview.append(heading);
+    const list = document.createElement('ul');
+    descriptions.forEach((description) => { const item = document.createElement('li'); item.textContent = description; list.append(item); });
+    preview.append(list);
+  }
+  for (const [label, values] of [['Assumptions', proposal.assumptions], ['Warnings', proposal.warnings]]) {
+    if (!values?.length) continue;
+    const heading = document.createElement('h4'); heading.textContent = label; preview.append(heading);
+    const list = document.createElement('ul'); values.forEach((value) => { const item = document.createElement('li'); item.textContent = value; list.append(item); }); preview.append(list);
+  }
+  preview.classList.remove('hidden');
+}
+
+$('#assistant-submit').addEventListener('click', async () => {
+  const prompt = $('#assistant-prompt').value.trim();
+  if (!prompt) return assistantError('Describe the diagram or documentation change you want.');
+  const button = $('#assistant-submit'); button.disabled = true; button.textContent = 'Generating…'; assistantError();
+  const controller = new AbortController(); assistant.controller?.abort(); assistant.controller = controller;
+  try {
+    const snapshot = await currentAssistantSnapshot();
+    snapshot.requestId = globalThis.crypto?.randomUUID?.() || `request-${Date.now()}`;
+    // Bind correlation into the revision without making the random request ID part of content staleness.
+    assistant.snapshot = snapshot;
+    const result = await api('/api/assistant/proposals', { method: 'POST', headers: { 'content-type': 'application/json' }, signal: controller.signal, body: JSON.stringify({ requestId: snapshot.requestId, prompt, snapshot }) });
+    if (assistant.controller !== controller || controller.signal.aborted) return;
+    assistant.proposal = validateProposal(result.proposal, snapshot);
+    renderProposal(assistant.proposal);
+    button.classList.add('hidden'); $('#assistant-approve').classList.remove('hidden'); $('#assistant-reject').classList.remove('hidden');
+  } catch (error) { if (error.name !== 'AbortError') assistantError(error.message); }
+  finally { if (assistant.controller === controller) assistant.controller = null; button.disabled = false; button.textContent = 'Generate proposal'; }
+});
+
+$('#assistant-reject').addEventListener('click', closeAssistant);
+
+async function applyAssistantProposal(proposal) {
+  const before = { diagrams: new Map(), documents: new Map(), revision: assistant.snapshot.sourceRevision };
+  const diagramPaths = new Set([activeTab.path, ...proposal.operations.map((op) => op.diagramPath).filter(Boolean)]);
+  for (const path of diagramPaths) {
+    const tab = tabs.get(path);
+    if (tab) before.diagrams.set(path, (await tab.modeler.saveXML({ format: true })).xml);
+  }
+  const markdownOps = proposal.operations.filter((op) => op.type === 'replace_diagram_markdown' || op.type === 'replace_node_markdown');
+  for (const operation of markdownOps) {
+    const path = operation.path || (operation.type === 'replace_node_markdown' ? documentationPath(operation.diagramPath, operation.nodeId) : documentationPath(operation.diagramPath));
+    before.documents.set(path, await readFile(path, true));
+  }
+  try {
+    for (const operation of proposal.operations.filter((op) => op.type === 'create_composition' || op.type === 'open_composition')) {
+      const result = await api('/api/compositions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: operation.path }) });
+      await openDiagram(result.diagram);
+      if (!before.diagrams.has(result.diagram)) before.diagrams.set(result.diagram, null);
+    }
+    for (const operation of proposal.operations) {
+      if (['create_composition', 'open_composition'].includes(operation.type)) continue;
+      const tab = tabs.get(operation.diagramPath || assistant.snapshot.diagramPath) || activeTab;
+      const registry = tab.modeler.get('elementRegistry'); const modeling = tab.modeler.get('modeling');
+      if (operation.type === 'replace_node_type') tab.modeler.get('bpmnReplace').replaceElement(registry.get(operation.nodeId), { type: operation.bpmnType });
+      else if (operation.type === 'update_node_label') modeling.updateProperties(registry.get(operation.nodeId), { name: operation.label });
+      else if (operation.type === 'set_composition_link') modeling.updateProperties(registry.get(operation.nodeId), { calledElement: operation.path });
+      else if (operation.type === 'add_flow_node') {
+        const elementFactory = tab.modeler.get('elementFactory'); const root = tab.modeler.get('canvas').getRootElement();
+        const shape = elementFactory.createShape({ type: operation.bpmnType, id: operation.nodeId });
+        const created = modeling.createShape(shape, { x: operation.x || 180, y: operation.y || 160 }, root);
+        if (operation.label) modeling.updateProperties(created, { name: operation.label });
+      } else if (operation.type === 'connect_sequence_flow') modeling.connect(registry.get(operation.sourceId), registry.get(operation.targetId), { type: 'bpmn:SequenceFlow', id: operation.flowId });
+      else if (operation.type === 'replace_diagram_markdown' || operation.type === 'replace_node_markdown') {
+        const path = operation.path || (operation.type === 'replace_node_markdown' ? documentationPath(operation.diagramPath, operation.nodeId) : documentationPath(operation.diagramPath));
+        await queue.enqueue(path, operation.markdown);
+      }
+    }
+    for (const tab of tabs.values()) if (diagramPaths.has(tab.path) || before.diagrams.has(tab.path)) await flushDiagram(tab);
+    assistant.lastBeforeState = before;
+    $('#assistant-revert').classList.remove('hidden');
+  } catch (error) {
+    for (const [path, xml] of before.diagrams) if (xml && tabs.has(path)) await tabs.get(path).modeler.importXML(xml);
+    for (const [path, content] of before.documents) await queue.enqueue(path, content);
+    throw error;
+  }
+}
+
+$('#assistant-approve').addEventListener('click', async () => {
+  const button = $('#assistant-approve'); button.disabled = true; assistantError();
+  try {
+    const current = await currentAssistantSnapshot();
+    validateProposal(assistant.proposal, assistant.snapshot, { currentRevision: current.sourceRevision });
+    await applyAssistantProposal(assistant.proposal);
+    await updateInspector();
+    closeAssistant(); showToast('Assistant changes applied. Use diagram undo or Revert assistant change if needed.');
+  } catch (error) { assistantError(error.message); }
+  finally { button.disabled = false; }
+});
+
+$('#assistant-revert').addEventListener('click', async () => {
+  const before = assistant.lastBeforeState;
+  if (!before) return;
+  try {
+    for (const [path, xml] of before.diagrams) if (xml && tabs.has(path)) { await tabs.get(path).modeler.importXML(xml); await queue.enqueue(path, xml); }
+    for (const [path, content] of before.documents) await queue.enqueue(path, content);
+    assistant.lastBeforeState = null;
+    $('#assistant-revert').classList.add('hidden');
+    await updateInspector();
+    showToast('Assistant change reverted');
+  } catch (error) { showToast(`Could not revert assistant change: ${error.message}`); }
+});
 
 $('#element-label').addEventListener('change', (event) => updateBusinessProperty('name', event.target.value));
 $('#element-id').addEventListener('change', async (event) => {

@@ -5,14 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <title>Software Schematic</title>
-    <script type="module" crossorigin src="./vendor/index-CsBMms0g.js"></script>
-    <link rel="stylesheet" crossorigin href="./vendor/index-NX7Ln-jw.css">
+    <script type="module" crossorigin src="./vendor/index-BPk0ZMJa.js"></script>
+    <link rel="stylesheet" crossorigin href="./vendor/index-BvVCcUaE.css">
   </head>
   <body>
     <div id="app" class="app-shell">
       <header class="topbar">
         <div class="brand"><span class="brand-mark">SS</span><span>Software Schematic</span></div>
         <div class="topbar-actions">
+          <button id="assistant-revert" class="secondary-button compact hidden" title="Revert the most recent assistant change">Revert assistant change</button>
           <button id="fit-view" class="icon-button" title="Enter full screen" aria-label="Enter full screen" aria-pressed="false"><i data-lucide="maximize-2"></i></button>
           <div id="save-status" class="save-status saved" role="status"><span class="status-dot"></span><span>Saved</span></div>
         </div>
@@ -47,6 +48,17 @@
         </aside>
       </main>
       <div id="toast" class="toast hidden" role="alert"></div>
+      <div id="assistant-modal" class="modal-backdrop hidden" role="presentation">
+        <section class="assistant-dialog" role="dialog" aria-modal="true" aria-labelledby="assistant-title">
+          <header class="assistant-header"><div><div class="eyebrow">AI assistant</div><h2 id="assistant-title">Suggest diagram changes</h2></div><button id="assistant-close" class="icon-button" aria-label="Close assistant"><i data-lucide="x"></i></button></header>
+          <p id="assistant-scope" class="assistant-scope"></p>
+          <p id="assistant-disclosure" class="assistant-disclosure">The selected provider receives active diagram structure and relevant Markdown. No credential is sent to the browser.</p>
+          <label class="assistant-prompt"><span>What should change?</span><textarea id="assistant-prompt" rows="5" placeholder="For example: turn this task into a subprocess and add four ordered steps."></textarea></label>
+          <div id="assistant-error" class="assistant-error hidden" role="alert"></div>
+          <div id="assistant-preview" class="assistant-preview hidden" aria-live="polite"></div>
+          <footer class="assistant-actions"><button id="assistant-cancel" class="secondary-button">Cancel</button><button id="assistant-reject" class="secondary-button hidden">Reject</button><button id="assistant-submit" class="primary-button">Generate proposal</button><button id="assistant-approve" class="primary-button hidden">Approve changes</button></footer>
+        </section>
+      </div>
     </div>
   </body>
 </html>

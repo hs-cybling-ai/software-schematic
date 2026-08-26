@@ -1,10 +1,12 @@
 use axum::{
     Json, Router,
+    extract::DefaultBodyLimit,
     extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+pub mod assistant;
 use include_dir::{Dir, include_dir};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -128,6 +130,7 @@ fn absolute(path: &Path) -> Result<PathBuf> {
 pub struct AppState {
     project: Arc<PathBuf>,
     schematics: Arc<PathBuf>,
+    assistant_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
@@ -137,6 +140,7 @@ impl AppState {
         Ok(Self {
             project: Arc::new(project),
             schematics: Arc::new(schematics),
+            assistant_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         })
     }
 
@@ -240,10 +244,36 @@ pub fn app(state: AppState) -> Router {
         .route("/api/file", get(read_file).put(write_file))
         .route("/api/rename-documentation", post(rename_documentation))
         .route("/api/compositions", post(resolve_composition))
+        .route(
+            "/api/assistant/proposals",
+            post(assistant_proposal).layer(DefaultBodyLimit::max(512 * 1024)),
+        )
         .fallback_service(
             ServeDir::new(&web).not_found_service(ServeFile::new(web.join("index.html"))),
         )
         .with_state(state)
+}
+
+async fn assistant_proposal(
+    State(state): State<AppState>,
+    Json(request): Json<assistant::AssistantRequest>,
+) -> Result<Json<assistant::AssistantResult>> {
+    let _permit = state
+        .assistant_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            Error::Message(
+                "assistant request limit reached; wait for an active request to finish".into(),
+            )
+        })?;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        assistant::generate(&request),
+    )
+    .await
+    .map_err(|_| Error::Message("assistant provider timed out".into()))??;
+    Ok(Json(result))
 }
 
 async fn project_metadata(State(state): State<AppState>) -> Result<Json<ProjectMetadata>> {
@@ -557,7 +587,11 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let metadata: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(metadata, serde_json::json!({ "name": "Café Platform" }));
-        assert!(!String::from_utf8(bytes).unwrap().contains(&parent.path().to_string_lossy().to_string()));
+        assert!(
+            !String::from_utf8(bytes)
+                .unwrap()
+                .contains(&parent.path().to_string_lossy().to_string())
+        );
     }
 
     #[tokio::test]
@@ -615,5 +649,26 @@ mod tests {
                 .is_file()
         );
         assert!(directory.path().join("schematics/order/main.md").is_file());
+    }
+
+    #[tokio::test]
+    async fn assistant_endpoint_returns_a_correlated_non_mutating_fake_proposal() {
+        let (directory, _) = initialized();
+        let before = fs::read_to_string(directory.path().join("schematics/main.bpmn")).unwrap();
+        let router = app(AppState::new(directory.path()).unwrap());
+        let (status, bytes) = send(router, "POST", "/api/assistant/proposals", Some(serde_json::json!({
+            "requestId": "request-1", "prompt": "Improve this task", "snapshot": {
+                "version": "1.0", "diagramPath": "main.bpmn", "sourceRevision": "revision-1", "primaryNodeId": "Task_1",
+                "graph": {"nodes": [{"id": "Task_1", "label": "Work", "status": "open"}], "flows": []}
+            }
+        }))).await;
+        assert_eq!(status, StatusCode::OK);
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["proposal"]["requestId"], "request-1");
+        assert_eq!(result["provider"], "fake");
+        assert_eq!(
+            fs::read_to_string(directory.path().join("schematics/main.bpmn")).unwrap(),
+            before
+        );
     }
 }
