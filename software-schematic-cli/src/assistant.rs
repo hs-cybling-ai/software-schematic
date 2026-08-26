@@ -159,7 +159,7 @@ impl LocalCliProvider {
     fn run(&self, request: &AssistantRequest) -> Result<AssistantResult> {
         let schema = operation_plan_schema();
         let prompt = format!(
-            "Return only a Software Schematic operation plan matching the supplied JSON schema. Do not inspect files, run tools, or mutate anything. Preserve requestId={} and sourceRevision={}. Every path must be non-empty and relative to the schematics directory: use main.bpmn or a composition slug such as checkout/main.bpmn, never an absolute path and never a schematics/ prefix. When a requested child flow needs a new composition and none is named, choose a short slug from the selected node label. Interpret system task as bpmn:ServiceTask. Emit each intended operation only once. User request: {}\nContext: {}",
+            "Return only a Software Schematic operation plan matching the supplied JSON schema. Do not inspect files, run tools, or mutate anything. Preserve requestId={} and sourceRevision={}. Every path must be non-empty and relative to the schematics directory, never absolute and never prefixed with schematics/. For create_composition, open_composition, and set_composition_link, use only a composition folder such as checkout. For diagramPath, use a BPMN file such as checkout/main.bpmn. When a requested child flow needs a new composition and none is named, choose a short folder slug from the selected node label. Interpret system task as bpmn:ServiceTask. Emit each intended operation only once. User request: {}\nContext: {}",
             request.request_id,
             request.snapshot["sourceRevision"]
                 .as_str()
@@ -408,15 +408,24 @@ pub async fn generate(
 
 fn canonicalize_plan_paths(plan: &mut AssistantPlan) -> Result<()> {
     for operation in &mut plan.operations {
+        let operation_type = operation["type"].as_str().unwrap_or_default().to_owned();
         for field in ["path", "diagramPath"] {
             let Some(raw) = operation[field].as_str() else {
                 continue;
             };
             let trimmed = raw.trim();
-            let normalized = trimmed
+            let mut normalized = trimmed
                 .strip_prefix("/schematics/")
                 .or_else(|| trimmed.strip_prefix("schematics/"))
                 .unwrap_or(trimmed);
+            if field == "path"
+                && matches!(
+                    operation_type.as_str(),
+                    "create_composition" | "open_composition" | "set_composition_link"
+                )
+            {
+                normalized = normalized.strip_suffix("/main.bpmn").unwrap_or(normalized);
+            }
             confined_path(normalized)?;
             operation[field] = json!(normalized);
         }
@@ -673,6 +682,9 @@ mod tests {
                 json!({"type":"create_composition","path":" /schematics/cybling-setup "}),
             ],
         };
+        canonicalize_plan_paths(&mut plan).unwrap();
+        assert_eq!(plan.operations[0]["path"], "cybling-setup");
+        plan.operations[0]["path"] = json!("cybling-setup/main.bpmn");
         canonicalize_plan_paths(&mut plan).unwrap();
         assert_eq!(plan.operations[0]["path"], "cybling-setup");
         plan.operations[0]["path"] = json!("");
