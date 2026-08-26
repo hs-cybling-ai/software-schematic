@@ -8,6 +8,7 @@ SSW users can author diagrams and Markdown manually, but cannot ask an AI assist
 - Add a magic button to the diagram palette that opens the same assistant dialog with the full active diagram and its documentation in scope, allowing suggestions that span existing nodes and flows.
 - Let users request changes such as replacing a task with a subprocess, creating or opening the subprocess composition, adding a multi-step flow, and updating the related Markdown.
 - Introduce a provider-neutral assistant boundary with an initial OpenAI implementation and extension points for Anthropic Claude and Google Gemini.
+- Add `ssw auth login|status|logout` so projects can reuse an officially authenticated local Codex or Claude Code CLI without storing account credentials or API keys in the project.
 - Require models to return a constrained, declarative change plan rather than raw JavaScript, shell commands, or unconstrained BPMN XML.
 - Validate proposed operations against BPMN rules, project path confinement, unique identifiers, and node statuses; `locked` nodes cannot be changed.
 - Show a human-readable preview of diagram and documentation changes and require explicit approval before applying them.

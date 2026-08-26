@@ -1,7 +1,14 @@
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::HashSet, env, time::Duration};
+use std::{
+    collections::HashSet,
+    env,
+    io::Write,
+    path::PathBuf,
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 pub const SCHEMA_VERSION: &str = "1.0";
 pub const MAX_OPERATIONS: usize = 64;
@@ -136,6 +143,134 @@ pub struct OpenAiProvider {
     client: reqwest::Client,
 }
 
+pub struct LocalCliProvider {
+    kind: String,
+    project: PathBuf,
+}
+
+impl LocalCliProvider {
+    pub fn new(kind: &str, project: PathBuf) -> Self {
+        Self {
+            kind: kind.into(),
+            project,
+        }
+    }
+
+    fn run(&self, request: &AssistantRequest) -> Result<AssistantResult> {
+        let schema = operation_plan_schema();
+        let prompt = format!(
+            "Return only a Software Schematic operation plan matching the supplied JSON schema. Do not inspect files, run tools, or mutate anything. Preserve requestId={} and sourceRevision={}. User request: {}\nContext: {}",
+            request.request_id,
+            request.snapshot["sourceRevision"]
+                .as_str()
+                .unwrap_or_default(),
+            request.prompt,
+            request.snapshot
+        );
+        let output = if self.kind == "codex" {
+            let schema_path = self.project.join(".ss/operation-plan.schema.json");
+            let mut child = Command::new("codex")
+                .args([
+                    "exec",
+                    "--ephemeral",
+                    "--sandbox",
+                    "read-only",
+                    "--skip-git-repo-check",
+                    "--ignore-user-config",
+                    "--color",
+                    "never",
+                    "--output-schema",
+                ])
+                .arg(schema_path)
+                .args([
+                    "-c",
+                    "features.shell_tool=false",
+                    "-c",
+                    "features.web_search=false",
+                    "-",
+                ])
+                .current_dir(self.project.join(".ss"))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|_| {
+                    Error::Message("Codex CLI is unavailable; run ./ssw auth login".into())
+                })?;
+            child.stdin.take().unwrap().write_all(prompt.as_bytes())?;
+            child.wait_with_output()?
+        } else {
+            Command::new("claude")
+                .args([
+                    "-p",
+                    "--output-format",
+                    "json",
+                    "--no-session-persistence",
+                    "--permission-mode",
+                    "plan",
+                    "--tools",
+                    "",
+                    "--json-schema",
+                ])
+                .arg(schema.to_string())
+                .arg(prompt)
+                .current_dir(self.project.join(".ss"))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(|_| {
+                    Error::Message(
+                        "Claude Code is unavailable; run ./ssw auth login --provider claude".into(),
+                    )
+                })?
+        };
+        if !output.status.success() {
+            return Err(Error::Message(format!(
+                "{} assistant is not authenticated or could not generate a proposal; run ./ssw auth status",
+                self.kind
+            )));
+        }
+        if output.stdout.len() > MAX_RESPONSE_BYTES {
+            return Err(Error::Message(
+                "local assistant response exceeds the configured limit".into(),
+            ));
+        }
+        let mut value: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+            Error::Message(format!(
+                "{} returned malformed structured output",
+                self.kind
+            ))
+        })?;
+        if self.kind == "claude" {
+            value = value
+                .get("structured_output")
+                .cloned()
+                .or_else(|| {
+                    value
+                        .get("result")
+                        .and_then(Value::as_str)
+                        .and_then(|text| serde_json::from_str(text).ok())
+                })
+                .ok_or_else(|| Error::Message("Claude returned no structured proposal".into()))?;
+        }
+        let plan: AssistantPlan = serde_json::from_value(value).map_err(|_| {
+            Error::Message(format!("{} returned an invalid operation plan", self.kind))
+        })?;
+        Ok(AssistantResult {
+            proposal: plan,
+            provider: self.kind.clone(),
+            model: "account-default".into(),
+            usage: json!({}),
+        })
+    }
+}
+
+impl AssistantProvider for LocalCliProvider {
+    async fn propose(&self, request: &AssistantRequest) -> Result<AssistantResult> {
+        self.run(request)
+    }
+}
+
 impl OpenAiProvider {
     pub fn new(model: String, endpoint: String, key: String) -> Result<Self> {
         if endpoint != "https://api.openai.com/v1/responses" {
@@ -208,9 +343,16 @@ impl AssistantProvider for OpenAiProvider {
     }
 }
 
-pub async fn generate(request: &AssistantRequest) -> Result<AssistantResult> {
+pub async fn generate(
+    request: &AssistantRequest,
+    project: PathBuf,
+    configured_provider: Option<String>,
+) -> Result<AssistantResult> {
     validate_request(request)?;
-    let provider = env::var("SSW_ASSISTANT_PROVIDER").unwrap_or_else(|_| "fake".into());
+    let provider = env::var("SSW_ASSISTANT_PROVIDER")
+        .ok()
+        .or(configured_provider)
+        .unwrap_or_else(|| "fake".into());
     let model = env::var("SSW_ASSISTANT_MODEL").unwrap_or_else(|_| {
         if provider == "openai" {
             "gpt-5.4".into()
@@ -228,9 +370,14 @@ pub async fn generate(request: &AssistantRequest) -> Result<AssistantResult> {
                 .propose(request)
                 .await?
         }
+        "codex" | "claude" => {
+            LocalCliProvider::new(&provider, project)
+                .propose(request)
+                .await?
+        }
         _ => {
             return Err(Error::Message(
-                "assistant provider is not allowlisted; use fake or openai".into(),
+                "assistant provider is not allowlisted; use codex, claude, fake, or openai".into(),
             ));
         }
     };
@@ -362,7 +509,7 @@ fn confined_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-fn operation_plan_schema() -> Value {
+pub fn operation_plan_schema() -> Value {
     json!({
         "type": "object", "additionalProperties": false,
         "required": ["version", "requestId", "sourceRevision", "summary", "assumptions", "warnings", "operations"],

@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
-use software_schematic_cli::{Result, init_project, serve};
+use software_schematic_cli::{
+    Result, assistant_auth_login, assistant_auth_logout, assistant_auth_status, init_project, serve,
+};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -23,6 +25,27 @@ enum Command {
         #[arg(long)]
         no_open: bool,
     },
+    /// Configure a locally installed Codex or Claude assistant.
+    Auth {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthCommand {
+    /// Open the provider's official account login flow.
+    Login {
+        /// Prefer codex or claude; Codex is chosen first when omitted.
+        #[arg(long)]
+        provider: Option<String>,
+    },
+    /// Show the selected provider and its authentication status.
+    Status,
+    /// Sign out of the selected provider and clear the project selection.
+    Logout,
 }
 
 #[tokio::main]
@@ -38,6 +61,11 @@ async fn main() -> Result<()> {
             println!("Run ./ssw (macOS) or ssw.cmd (Windows) to open it.");
         }
         Command::Serve { project, no_open } => serve(project, !no_open).await?,
+        Command::Auth { project, command } => match command {
+            AuthCommand::Login { provider } => assistant_auth_login(project, provider.as_deref())?,
+            AuthCommand::Status => assistant_auth_status(project)?,
+            AuthCommand::Logout => assistant_auth_logout(project)?,
+        },
     }
     Ok(())
 }

@@ -70,6 +70,10 @@ The Rust server exposes a confined assistant-proposal endpoint. An `AssistantPro
 
 The endpoint enforces timeouts, cancellation, maximum request/response sizes, concurrency limits, and redacted errors. Provider/model configuration is explicit and local. A deterministic fake provider drives tests.
 
+### Delegate subscription authentication to official local agent CLIs
+
+`ssw auth login` discovers Codex first and Claude Code second, or accepts an explicit provider selection. It launches the provider's official login command and never prompts for passwords, MFA codes, cookies, or tokens. The project stores only the provider name under `.ss`; credentials remain in the provider CLI's credential cache or OS keychain. Proposal generation invokes the selected CLI ephemerally with tools disabled, read-only or plan permissions, no conversation persistence, and the canonical operation-plan output schema. Status and logout likewise delegate to the official CLI.
+
 ### Keep MCP as a follow-on surface over the same engine
 
 The operation schema, context builder, validators, and executor are designed so a later local MCP server can expose read/propose/apply tools to Codex, Claude Code, or Gemini without duplicating mutation logic. MCP is not required for the embedded magic-button workflow and is excluded from the initial implementation.

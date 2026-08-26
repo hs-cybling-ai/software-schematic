@@ -49,3 +49,10 @@
 - [x] 7.2 Verify no provider credential appears in browser assets, project metadata, `.ss` output, diagram or Markdown files, previews, errors, or captured logs.
 - [x] 7.3 Run web and Rust test suites, production asset and release builds, and manual keyboard/browser verification of both magic entry points and the task-to-subprocess example.
 - [x] 7.4 Document provider configuration, transmitted context, supported operations, limits, cancellation, approval, recovery, and the future Claude/Gemini/MCP extension boundary.
+
+## 8. Local Agent Authentication
+
+- [x] 8.1 Add wrapper and Rust CLI commands for local-agent login, status, logout, discovery, and explicit provider selection.
+- [x] 8.2 Add Codex and Claude Code providers that reuse official cached account authentication and require the canonical structured plan with tools disabled.
+- [x] 8.3 Persist only the selected provider, expose it in safe project metadata, and identify it in the assistant disclosure.
+- [x] 8.4 Add configuration/security tests and document the account-authenticated workflow.

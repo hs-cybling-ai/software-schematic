@@ -26,6 +26,7 @@ let activeTab = null;
 let selectedElement = null;
 let editingMarkdown = false;
 let markdownTimer = null;
+let assistantProvider = 'fake';
 const queue = new RevisionQueue(writeFile, setSaveState);
 
 const DEFAULT_ACTIVITY_WIDTH = 100;
@@ -424,6 +425,7 @@ function openAssistant({ scope, elementId, invoker }) {
   $('#assistant-reject').classList.add('hidden');
   $('#assistant-prompt').value = '';
   $('#assistant-scope').textContent = scope === 'node' ? `Node: ${businessLabel(element)} in ${compositionIdentity(activeTab.path).displayPath}` : `Complete diagram: ${compositionIdentity(activeTab.path).displayPath}`;
+  $('#assistant-disclosure').textContent = `Provider: ${assistantProvider}. It receives active diagram structure and relevant Markdown. No credential is sent to the browser.`;
   $('#assistant-modal').classList.remove('hidden');
   $('#assistant-prompt').focus();
 }
@@ -660,6 +662,7 @@ async function initialize() {
   try {
     const metadata = await api('/api/project');
     document.title = projectDocumentTitle(metadata?.name);
+    assistantProvider = metadata?.assistant_provider || 'fake';
   } catch {}
   await openDiagram('main.bpmn');
 }

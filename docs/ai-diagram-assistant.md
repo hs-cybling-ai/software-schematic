@@ -4,6 +4,17 @@ Software Schematic exposes the same proposal workflow from two magic actions: th
 
 ## Configuration
 
+The recommended local setup reuses an official Codex or Claude Code account login:
+
+```sh
+./ssw auth login
+./ssw auth status
+```
+
+Codex is preferred when both CLIs are installed. Select Claude explicitly with `./ssw auth login --provider claude`. SSW launches the provider's official browser sign-in and stores only the project provider selection in `.ss/assistant.json`; it never receives account passwords, MFA codes, session cookies, or access tokens. `./ssw auth logout` delegates to the selected CLI and removes the project selection.
+
+Local providers run ephemerally with tools disabled, a read-only sandbox or plan permission mode, no conversation persistence, and the same strict operation-plan schema used by the API provider. SSW remains solely responsible for validating, previewing, approving, and applying changes.
+
 The deterministic local provider is the default and is intended for testing:
 
 ```sh

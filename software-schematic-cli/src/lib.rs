@@ -22,9 +22,8 @@ use walkdir::WalkDir;
 static WEB_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets/web");
 const STARTER_BPMN: &str = include_str!("../assets/starter.bpmn");
 const STARTER_MD: &str = include_str!("../assets/starter.md");
-const MAC_WRAPPER: &str = "#!/bin/sh\nset -eu\nSCRIPT_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nexec \"$SCRIPT_DIR/.ss/bin/ss\" serve --project \"$SCRIPT_DIR\" \"$@\"\n";
-const WINDOWS_WRAPPER: &str =
-    "@echo off\r\nsetlocal\r\n\"%~dp0.ss\\bin\\ss.exe\" serve --project \"%~dp0\" %*\r\n";
+const MAC_WRAPPER: &str = "#!/bin/sh\nset -eu\nSCRIPT_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nif [ \"${1:-}\" = \"auth\" ]; then\n  shift\n  exec \"$SCRIPT_DIR/.ss/bin/ss\" auth --project \"$SCRIPT_DIR\" \"$@\"\nfi\nexec \"$SCRIPT_DIR/.ss/bin/ss\" serve --project \"$SCRIPT_DIR\" \"$@\"\n";
+const WINDOWS_WRAPPER: &str = "@echo off\r\nsetlocal\r\nif \"%~1\"==\"auth\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" auth --project \"%~dp0\" %*\r\n) else (\r\n  \"%~dp0.ss\\bin\\ss.exe\" serve --project \"%~dp0\" %*\r\n)\r\n";
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -94,6 +93,10 @@ pub fn init_project(project: impl AsRef<Path>) -> Result<ProjectLayout> {
         tool.join("version"),
         format!("{}\n", env!("CARGO_PKG_VERSION")),
     )?;
+    fs::write(
+        tool.join("operation-plan.schema.json"),
+        serde_json::to_vec_pretty(&assistant::operation_plan_schema()).unwrap(),
+    )?;
     fs::write(schematics.join("main.bpmn"), STARTER_BPMN)?;
     fs::write(schematics.join("main.md"), STARTER_MD)?;
     fs::write(project.join("ssw"), MAC_WRAPPER)?;
@@ -124,6 +127,134 @@ fn absolute(path: &Path) -> Result<PathBuf> {
     } else {
         Ok(std::env::current_dir()?.join(path))
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AssistantProjectConfig {
+    provider: String,
+}
+
+fn assistant_config_path(project: &Path) -> PathBuf {
+    project.join(".ss/assistant.json")
+}
+
+fn command_available(command: &str) -> bool {
+    std::process::Command::new(command)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn configured_assistant_provider(project: &Path) -> Option<String> {
+    fs::read(assistant_config_path(project))
+        .ok()
+        .and_then(|content| serde_json::from_slice::<AssistantProjectConfig>(&content).ok())
+        .map(|config| config.provider)
+}
+
+pub fn assistant_auth_login(project: impl AsRef<Path>, requested: Option<&str>) -> Result<()> {
+    let project = absolute(project.as_ref())?.canonicalize()?;
+    let provider = match requested {
+        Some("codex") if command_available("codex") => "codex",
+        Some("claude") if command_available("claude") => "claude",
+        Some("codex" | "claude") => {
+            return Err(Error::Message(format!(
+                "{} CLI is not installed or not available on PATH",
+                requested.unwrap()
+            )));
+        }
+        Some(other) => {
+            return Err(Error::Message(format!(
+                "unsupported assistant provider: {other}"
+            )));
+        }
+        None if command_available("codex") => "codex",
+        None if command_available("claude") => "claude",
+        None => {
+            return Err(Error::Message(
+                "install Codex CLI or Claude Code before running assistant login".into(),
+            ));
+        }
+    };
+    println!(
+        "Opening the official {provider} sign-in flow. SSW never receives your password or token."
+    );
+    let status = if provider == "codex" {
+        std::process::Command::new("codex").arg("login").status()?
+    } else {
+        std::process::Command::new("claude")
+            .args(["auth", "login"])
+            .status()?
+    };
+    if !status.success() {
+        return Err(Error::Message(format!(
+            "{provider} sign-in did not complete"
+        )));
+    }
+    let path = assistant_config_path(&project);
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&AssistantProjectConfig {
+            provider: provider.into(),
+        })
+        .unwrap(),
+    )?;
+    println!("Software Schematic assistant configured to use {provider} for this project.");
+    Ok(())
+}
+
+pub fn assistant_auth_status(project: impl AsRef<Path>) -> Result<()> {
+    let project = absolute(project.as_ref())?.canonicalize()?;
+    let Some(provider) = configured_assistant_provider(&project) else {
+        println!("No local assistant is configured. Run ./ssw auth login.");
+        return Ok(());
+    };
+    let status = if provider == "codex" {
+        std::process::Command::new("codex")
+            .args(["login", "status"])
+            .status()?
+    } else {
+        std::process::Command::new("claude")
+            .args(["auth", "status"])
+            .status()?
+    };
+    if !status.success() {
+        return Err(Error::Message(format!(
+            "{provider} is configured but not authenticated"
+        )));
+    }
+    println!("Project assistant provider: {provider}");
+    Ok(())
+}
+
+pub fn assistant_auth_logout(project: impl AsRef<Path>) -> Result<()> {
+    let project = absolute(project.as_ref())?.canonicalize()?;
+    let Some(provider) = configured_assistant_provider(&project) else {
+        return Err(Error::Message(
+            "no project assistant provider is configured".into(),
+        ));
+    };
+    let status = if provider == "codex" {
+        std::process::Command::new("codex").arg("logout").status()?
+    } else {
+        std::process::Command::new("claude")
+            .args(["auth", "logout"])
+            .status()?
+    };
+    if !status.success() {
+        return Err(Error::Message(format!(
+            "{provider} logout did not complete"
+        )));
+    }
+    let path = assistant_config_path(&project);
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    println!("Signed out of {provider} and removed the project assistant selection.");
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -234,6 +365,7 @@ struct CompositionResponse {
 #[derive(Serialize)]
 struct ProjectMetadata {
     name: String,
+    assistant_provider: String,
 }
 
 pub fn app(state: AppState) -> Router {
@@ -269,7 +401,11 @@ async fn assistant_proposal(
         })?;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        assistant::generate(&request),
+        assistant::generate(
+            &request,
+            state.project.as_ref().clone(),
+            configured_assistant_provider(state.project.as_path()),
+        ),
     )
     .await
     .map_err(|_| Error::Message("assistant provider timed out".into()))??;
@@ -279,6 +415,10 @@ async fn assistant_proposal(
 async fn project_metadata(State(state): State<AppState>) -> Result<Json<ProjectMetadata>> {
     Ok(Json(ProjectMetadata {
         name: state.project_name()?,
+        assistant_provider: std::env::var("SSW_ASSISTANT_PROVIDER")
+            .ok()
+            .or_else(|| configured_assistant_provider(state.project.as_path()))
+            .unwrap_or_else(|| "fake".into()),
     }))
 }
 
@@ -478,6 +618,7 @@ mod tests {
     fn initialization_writes_complete_versioned_layout_and_refuses_collisions() {
         let (directory, layout) = initialized();
         assert!(layout.tool.join("web/index.html").is_file());
+        assert!(layout.tool.join("operation-plan.schema.json").is_file());
         assert!(layout.tool.join("web/vendor").is_dir());
         assert!(layout.schematics.join("main.bpmn").is_file());
         assert!(layout.schematics.join("main.md").is_file());
@@ -486,6 +627,11 @@ mod tests {
             format!("{}\n", env!("CARGO_PKG_VERSION"))
         );
         assert!(directory.path().join("ssw.cmd").is_file());
+        assert!(
+            fs::read_to_string(directory.path().join("ssw"))
+                .unwrap()
+                .contains("auth --project")
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -504,6 +650,20 @@ mod tests {
                 .to_string()
                 .contains("already exists")
         );
+    }
+
+    #[test]
+    fn project_assistant_configuration_contains_only_the_provider_selection() {
+        let (directory, _) = initialized();
+        let path = directory.path().join(".ss/assistant.json");
+        fs::write(&path, br#"{"provider":"codex"}"#).unwrap();
+        assert_eq!(
+            configured_assistant_provider(directory.path()).as_deref(),
+            Some("codex")
+        );
+        let content = fs::read_to_string(path).unwrap();
+        assert!(!content.to_ascii_lowercase().contains("token"));
+        assert!(!content.to_ascii_lowercase().contains("password"));
     }
 
     #[test]
@@ -586,7 +746,10 @@ mod tests {
         let (status, bytes) = send(router, "GET", "/api/project", None).await;
         assert_eq!(status, StatusCode::OK);
         let metadata: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(metadata, serde_json::json!({ "name": "Café Platform" }));
+        assert_eq!(
+            metadata,
+            serde_json::json!({ "name": "Café Platform", "assistant_provider": "fake" })
+        );
         assert!(
             !String::from_utf8(bytes)
                 .unwrap()

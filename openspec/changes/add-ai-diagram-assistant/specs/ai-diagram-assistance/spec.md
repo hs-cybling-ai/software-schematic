@@ -108,3 +108,18 @@ Provider credentials SHALL remain in the Rust host environment or an approved OS
 #### Scenario: Provider target is not allowed
 - **WHEN** configuration attempts to send assistant context to a non-allowlisted or non-HTTPS endpoint
 - **THEN** the Rust server rejects the request before transmitting project context
+
+### Requirement: Local account authentication
+The project wrapper SHALL provide `auth login`, `auth status`, and `auth logout` commands for supported locally installed Codex and Claude Code CLIs. Login SHALL delegate to the provider's official authentication flow and SHALL NOT collect or persist passwords, MFA codes, session cookies, or access tokens. The project SHALL persist only its selected provider. Local proposal generation SHALL disable agent tools, use read-only or plan permissions, avoid conversation persistence, require the canonical structured operation plan, and retain the normal SSW validation and approval boundary.
+
+#### Scenario: User configures an installed local agent
+- **WHEN** the user runs `ssw auth login` and completes the official provider sign-in
+- **THEN** the project selects that provider and subsequent assistant proposals use its cached account authentication without a project API key
+
+#### Scenario: No supported local agent is installed
+- **WHEN** the user runs `ssw auth login` without Codex or Claude Code available
+- **THEN** the command explains that a supported CLI must be installed and stores no configuration
+
+#### Scenario: User signs out
+- **WHEN** the user runs `ssw auth logout`
+- **THEN** SSW delegates logout to the selected provider and removes the project provider selection
