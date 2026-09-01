@@ -1,5 +1,7 @@
 # Diagram Studio
 
+Software Schematic's reusable BPMN identity and deterministic folder conventions are documented in [Scoped process naming](docs/scoped-process-naming.md).
+
 Diagram Studio is a sandboxed native macOS 14+ workspace focused on Data Graph diagrams, with BPMN retained as the interaction benchmark and a supported format. The application shell is SwiftUI/AppKit; each retained editor tab hosts a fully local `WKWebView` bundle.
 
 ## Developer setup

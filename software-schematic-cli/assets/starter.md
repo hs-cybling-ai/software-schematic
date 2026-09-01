@@ -1,5 +1,5 @@
-# Main flow
+# Project domain
 
-Describe the intent, boundaries, and important decisions for this flow.
+Describe the domain, actors, inputs, outputs, needs, and business services represented by this CMMN anchor.
 
-Select a diagram element to attach focused documentation to its stable BPMN ID.
+Use Process Tasks to link business services to named BPMN logical architecture and solution-building-block designs. Select a diagram element to attach focused documentation to its stable CMMN ID.

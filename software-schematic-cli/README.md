@@ -1,6 +1,6 @@
 # Software Schematic CLI
 
-`ss` installs a versioned, project-local BPMN and Markdown modeling workspace. It is designed for model-driven AI development: diagrams and documentation live beside the source code in formats that people and coding agents can inspect directly.
+`ss` installs a versioned, project-local CMMN, BPMN, and Markdown modeling workspace. It is designed for model-driven AI development: business needs, solution designs, and documentation live beside the source code in formats that people and coding agents can inspect directly.
 
 ## Supported targets
 
@@ -35,29 +35,35 @@ On Windows, run `ssw.cmd`. The wrapper starts a server on an available `127.0.0.
 project/
 ├── .ss/
 │   ├── bin/ss          # ss.exe on Windows
+│   ├── starter.cmmn    # bundled template for root and named business anchors
 │   ├── version
 │   └── web/            # complete offline application and vendor assets
 ├── schematics/
-│   ├── main.bpmn
+│   ├── main.cmmn
 │   └── main.md
 ├── ssw
 └── ssw.cmd
 ```
 
-All browser code, CSS, BPMN fonts, icons, `bpmn-js`, Markdown rendering, sanitization, and Mermaid rendering are packaged in `.ss/web/`. The running application makes no CDN or package-registry requests and requires no Node.js installation.
+All browser code, CSS, BPMN/CMMN fonts and icons, `bpmn-js`, `cmmn-js`, Markdown rendering, sanitization, and Mermaid rendering are packaged in `.ss/web/`. The running application makes no CDN or package-registry requests and requires no Node.js installation.
 
 ## Composition conventions
 
-- `schematics/main.bpmn` and `schematics/main.md` describe the root composition.
-- Every nested composition folder has a `main.bpmn` and `main.md`.
-- Element documentation is stored beside its diagram as `docs/<element-id>.md`.
-- A BPMN call activity is an external subprocess. Its standard `calledElement` value is a normalized path relative to `schematics/`, such as `order` or `sales/quote`.
-- A BPMN subprocess is also composable: its label becomes a lowercase filesystem-safe folder name, so `Birth` resolves to `birth` and `Order Fulfillment` resolves to `order-fulfillment`.
-- Double-click a call activity, or use **Open composition**, to create and focus its base diagram.
-- Pools map to `<parent>/<pool-id>/`; lanes map to `<parent>/<pool-id>/<lane-id>/`.
-- Multiple call activities may reference the same folder and therefore reuse the same process model.
+- `schematics/main.cmmn` and `schematics/main.md` are the sole project anchor. They define the domain, actors, inputs, outputs, needs, and business services.
+- BPMN defines logical architecture and solution building blocks. What might previously have been a root BPMN is a named process opened from a CMMN Process Task.
+- Every diagram element has ID, Type, Label, Name, Implementation Status, and Documentation. Name is independent from ID and Label.
+- A reusable process Name uses `package.Process`. A node or edge Name uses `package.Process#nodeOrEdgeName`.
+- Process Name `sales.checkout.PlaceOrder` maps directly to `schematics/sales/checkout/PlaceOrder/`, which contains `main.bpmn` and the shared implementation documentation in `main.md`.
+- Node and edge documentation is bound to the occurrence ID at `docs/<element-id>.md`. Changing Name does not move that file; changing ID renames it.
+- Multiple call activities with the same process Name open the same subprocess implementation while retaining separate ID-bound call-site documentation in their owning diagrams.
+- Double-clicking a call activity or subprocess, or selecting its subprocess link icon, opens its named composition. If it is unnamed, the editor collects a valid `package.Process` Name in a modal before creating anything.
+- `calledElement` is a serialized mirror of the complete process Name and is not a separate editable field.
+- A CMMN business anchor uses a package Name: `cybling.sdk` maps to `schematics/cybling/sdk/main.cmmn` and its sibling `main.md`.
+- A named Process Task such as `cybling.sdk.Birth` creates or opens the BPMN design at `schematics/cybling/sdk/Birth/main.bpmn`.
+- Anchors are intentionally sparse. BPMN may still create nested package folders, and `cybling/sdk/main.cmmn` is not required merely because a BPMN design exists below that folder.
+- CMMN nodes and connections reuse the same ID, Type, Label, Name, Implementation Status, per-ID Markdown, automatic save, and bounded magic-action conventions as BPMN.
 
-The web editor automatically saves BPMN XML and Markdown. The Rust server accepts only typed operations and confines paths to `schematics/`.
+The web editor automatically saves BPMN XML, CMMN XML, and Markdown. The Rust server accepts only typed operations and confines paths to `schematics/`.
 
 ## Development checks
 

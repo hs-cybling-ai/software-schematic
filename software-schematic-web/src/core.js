@@ -6,6 +6,172 @@ export function normalizeCompositionPath(value) {
   return normalized;
 }
 
+export const ARCHITECTURAL_NAME_ATTRIBUTE = 'architecturalName';
+export const DIAGRAM_PROCESS_ATTRIBUTE = 'processName';
+export const DIAGRAM_PACKAGE_ATTRIBUTE = 'packageName';
+
+const LOWER_CAMEL = /^[a-z][A-Za-z0-9]*$/;
+const UPPER_CAMEL = /^[A-Z][A-Za-z0-9]*$/;
+
+export function validatePackageName(value) {
+  const name = String(value || '').trim();
+  if (!name || !name.split('.').every((segment) => LOWER_CAMEL.test(segment))) {
+    throw new Error('Package Name must use dot-separated lowerCamelCase segments, for example cybling.subscription');
+  }
+  return name;
+}
+
+export function validateProcessName(value) {
+  const name = String(value || '').trim();
+  if (!UPPER_CAMEL.test(name)) throw new Error('Process Name must use UpperCamelCase, for example SelectAndOutfit');
+  return name;
+}
+
+export function validateMemberName(value) {
+  const name = String(value || '').trim();
+  if (!LOWER_CAMEL.test(name)) throw new Error('Task or event Name must use lowerCamelCase, for example processSubscription');
+  return name;
+}
+
+export function validateElementName(value) {
+  const name = String(value || '').trim();
+  const [processName, memberName, extra] = name.split('#');
+  if (extra !== undefined) throw new Error('Name may contain only one # member separator');
+  validateQualifiedProcessName(processName);
+  if (memberName !== undefined) validateMemberName(memberName);
+  return name;
+}
+
+export function validateCmmnElementName(value) {
+  const name = String(value || '').trim();
+  const [packageName, memberName, extra] = name.split('#');
+  if (extra !== undefined) throw new Error('Name may contain only one # member separator');
+  validatePackageName(packageName);
+  if (memberName === undefined) throw new Error('CMMN node or connection Names require #memberName');
+  validateMemberName(memberName);
+  return name;
+}
+
+export function processNameFromElementName(value) {
+  return validateElementName(value).split('#')[0];
+}
+
+export function memberNameFromElementName(value) {
+  const name = validateElementName(value);
+  const separator = name.indexOf('#');
+  return separator < 0 ? null : name.slice(separator + 1);
+}
+
+export function collisionKey(value) {
+  return String(value || '').normalize('NFC').toLocaleLowerCase('en-US');
+}
+
+export function architecturalName(businessObject) {
+  return businessObject?.[ARCHITECTURAL_NAME_ATTRIBUTE]
+    || businessObject?.$attrs?.['ssw:architecturalName']
+    || businessObject?.$attrs?.['ssw:name']
+    || '';
+}
+
+export function setArchitecturalName(businessObject, value) {
+  if (!businessObject) throw new Error('A BPMN business object is required');
+  const name = String(value || '').trim();
+  businessObject[ARCHITECTURAL_NAME_ATTRIBUTE] = name || undefined;
+  return name;
+}
+
+export function qualifiedProcessName(packageName, processName) {
+  return `${validatePackageName(packageName)}.${validateProcessName(processName)}`;
+}
+
+export function qualifiedMemberName(owningProcessName, memberName) {
+  const owner = validateQualifiedProcessName(owningProcessName);
+  return `${owner}#${validateMemberName(memberName)}`;
+}
+
+export function validateQualifiedProcessName(value) {
+  const name = String(value || '').trim();
+  const segments = name.split('.');
+  if (segments.length < 2) throw new Error('Qualified process Name must include a package and process, for example cybling.SelectAndOutfit');
+  const processName = segments.pop();
+  return qualifiedProcessName(segments.join('.'), processName);
+}
+
+export function compositionFolderForQualifiedName(value) {
+  return validateQualifiedProcessName(processNameFromElementName(value)).replaceAll('.', '/');
+}
+
+export function qualifiedNameForCompositionFolder(value) {
+  const folder = normalizeCompositionPath(value).replace(/\/main\.bpmn$/, '');
+  return validateQualifiedProcessName(folder.split('/').join('.'));
+}
+
+export function diagramPathForQualifiedName(value) {
+  return `${compositionFolderForQualifiedName(value)}/main.bpmn`;
+}
+
+export function cmmnFolderForPackageName(value) {
+  return validatePackageName(value).replaceAll('.', '/');
+}
+
+export function cmmnPathForPackageName(value) {
+  return `${cmmnFolderForPackageName(value)}/main.cmmn`;
+}
+
+export function packageNameForCmmnPath(value) {
+  const path = normalizeCompositionPath(value).replace(/\/main\.cmmn$/i, '');
+  if (!path || path === 'main.cmmn') throw new Error('A named CMMN package must be beneath schematics');
+  return validatePackageName(path.split('/').join('.'));
+}
+
+export function owningProcessName(diagramPath, explicitName = '') {
+  if (explicitName) return validateQualifiedProcessName(explicitName);
+  if (isRootDiagram(diagramPath)) return null;
+  return qualifiedNameForCompositionFolder(compositionIdentity(diagramPath).folder);
+}
+
+export function owningPackageName(diagramPath, explicitProcessName = '') {
+  const processName = owningProcessName(diagramPath, explicitProcessName);
+  if (!processName) return null;
+  return processName.split('.').slice(0, -1).join('.');
+}
+
+export function resolveBpmnElementName(value, { diagramPath = ROOT_DIAGRAM_PATH, diagramProcessName = '', reusable = false } = {}) {
+  const name = String(value || '').trim();
+  if (name.includes('#')) {
+    const qualified = validateElementName(name);
+    if (reusable) throw new Error('A reusable process Name cannot use a # member separator');
+    return qualified;
+  }
+  if (name.includes('.')) {
+    const qualified = validateQualifiedProcessName(name);
+    if (!reusable) throw new Error('A node or edge Name must be a local member or use package.Process#memberName');
+    return qualified;
+  }
+  const parentProcess = owningProcessName(diagramPath, diagramProcessName);
+  if (!parentProcess) throw new Error('A short Name requires a named parent diagram; use a fully qualified Name here');
+  if (!reusable) return qualifiedMemberName(parentProcess, name);
+  return qualifiedProcessName(owningPackageName(diagramPath, diagramProcessName), name);
+}
+
+export function resolveCmmnElementName(value, { packageName = '', reusable = false } = {}) {
+  const name = String(value || '').trim();
+  const parentPackage = validatePackageName(packageName);
+  if (reusable) return name.includes('.') ? validateQualifiedProcessName(name) : qualifiedProcessName(parentPackage, name);
+  return name.includes('#') ? validateCmmnElementName(name) : `${parentPackage}#${validateMemberName(name)}`;
+}
+
+export function qualifiedSymbolFor(element, { diagramPath = ROOT_DIAGRAM_PATH, diagramProcessName = '', packageName = '' } = {}) {
+  const business = element?.businessObject || element;
+  const name = architecturalName(business);
+  if (!business || !name) return null;
+  return resolveBpmnElementName(name, {
+    diagramPath,
+    diagramProcessName,
+    reusable: ['bpmn:CallActivity', 'bpmn:SubProcess'].includes(business.$type),
+  });
+}
+
 export function compositionSlug(value) {
   const slug = value.trim().toLowerCase()
     .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
@@ -21,9 +187,9 @@ export function documentationPath(diagramPath, elementId) {
 }
 
 export function compositionIdentity(diagramPath) {
-  const folder = diagramPath.endsWith('/main.bpmn')
-    ? diagramPath.slice(0, -'/main.bpmn'.length)
-    : diagramPath === 'main.bpmn' ? '' : diagramPath.replace(/\/[^/]+\.bpmn$/, '');
+  const folder = /\/main\.(?:bpmn|cmmn)$/i.test(diagramPath)
+    ? diagramPath.replace(/\/main\.(?:bpmn|cmmn)$/i, '')
+    : /^main\.(?:bpmn|cmmn)$/i.test(diagramPath) ? '' : diagramPath.replace(/\/[^/]+\.(?:bpmn|cmmn)$/i, '');
   return {
     folder,
     name: folder ? compositionDisplayName(folder.split('/').at(-1)) : 'Main',
@@ -35,24 +201,42 @@ export function compositionDisplayName(folderName) {
   return folderName.split('-').filter(Boolean).map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
 }
 
-export function compositionBreadcrumbs(diagramPath) {
+export function compositionBreadcrumbs(diagramPath, rootDiagramPath = ROOT_DIAGRAM_PATH) {
   const { folder } = compositionIdentity(diagramPath);
-  const items = [{ name: 'Main', diagramPath: 'main.bpmn' }];
+  const items = [{ name: 'Main', diagramPath: rootDiagramPath }];
   if (!folder) return items;
   const segments = folder.split('/');
+  const extension = diagramPath.toLowerCase().endsWith('.cmmn') ? 'cmmn' : 'bpmn';
   segments.forEach((segment, index) => {
     items.push({
       name: compositionDisplayName(segment),
-      diagramPath: `${segments.slice(0, index + 1).join('/')}/main.bpmn`,
+      diagramPath: `${segments.slice(0, index + 1).join('/')}/main.${extension}`,
     });
   });
   return items;
 }
 
-export const ROOT_DIAGRAM_PATH = 'main.bpmn';
+export const ROOT_DIAGRAM_PATH = 'main.cmmn';
+export const LEGACY_ROOT_DIAGRAM_PATH = 'main.bpmn';
 
 export function isRootDiagram(path) {
-  return path === ROOT_DIAGRAM_PATH;
+  return path === ROOT_DIAGRAM_PATH || path === LEGACY_ROOT_DIAGRAM_PATH;
+}
+
+export function selectProjectAnchor(diagrams) {
+  const paths = new Set(Array.isArray(diagrams) ? diagrams : []);
+  const hasCmmn = paths.has(ROOT_DIAGRAM_PATH);
+  const hasBpmn = paths.has(LEGACY_ROOT_DIAGRAM_PATH);
+  if (hasCmmn && hasBpmn) throw new Error('Competing project anchors: remove main.bpmn after representing its process on main.cmmn');
+  if (hasCmmn) return ROOT_DIAGRAM_PATH;
+  if (hasBpmn) return LEGACY_ROOT_DIAGRAM_PATH;
+  throw new Error('Project anchor missing: expected schematics/main.cmmn');
+}
+
+export function diagramKind(path) {
+  if (String(path).toLowerCase().endsWith('.cmmn')) return 'cmmn';
+  if (String(path).toLowerCase().endsWith('.bpmn')) return 'bpmn';
+  throw new Error(`Unsupported diagram type: ${path}`);
 }
 
 export const NODE_STATUSES = Object.freeze({
@@ -72,26 +256,12 @@ export function projectDocumentTitle(projectName) {
 }
 
 export function compositionPathFor(element, diagramPath) {
-  const folder = diagramPath.includes('/') ? diagramPath.slice(0, diagramPath.lastIndexOf('/')) : '';
   const business = element?.businessObject;
-  if (!business) throw new Error('Select a pool, lane, or call activity');
-  if (business.$type === 'bpmn:CallActivity') return normalizeCompositionPath(business.calledElement || '');
-  if (business.$type === 'bpmn:SubProcess') return [folder, compositionSlug(business.name || '')].filter(Boolean).join('/');
-  if (business.$type === 'bpmn:Participant') return [folder, business.id].filter(Boolean).join('/');
-  if (business.$type === 'bpmn:Lane') {
-    const participant = findParticipant(element);
-    return [folder, participant?.businessObject?.id, business.id].filter(Boolean).join('/');
-  }
-  throw new Error('Only pools, lanes, subprocesses, and call activities have compositions');
-}
-
-function findParticipant(element) {
-  let current = element.parent;
-  while (current) {
-    if (current.businessObject?.$type === 'bpmn:Participant') return current;
-    current = current.parent;
-  }
-  return null;
+  if (!business) throw new Error('Select a reusable process');
+  if (!['bpmn:CallActivity', 'bpmn:SubProcess'].includes(business.$type)) throw new Error('Only reusable processes have compositions');
+  const name = qualifiedSymbolFor(element, { diagramPath });
+  if (memberNameFromElementName(name)) throw new Error('Only a process Name can open a composition');
+  return compositionFolderForQualifiedName(name);
 }
 
 export class RevisionQueue {

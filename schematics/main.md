@@ -1,5 +1,9 @@
 # Main flow
 
-Describe the intent, boundaries, and important decisions for this flow.
+This is the project entry diagram (`designPro.Main`). It begins the reusable `cybling.Birth` process and then displays the home page.
 
-Select a diagram element to attach focused documentation to its stable BPMN ID.
+## Identity and documentation
+
+- BPMN IDs identify occurrences in this diagram and bind their documentation to `docs/<element-id>.md`.
+- Names identify graph concepts and reusable processes. Nodes and edges use `designPro.Main#memberName`; the reusable subprocess uses `cybling.Birth`.
+- The `Birth` call site can have caller-specific documentation here, while the shared implementation is documented in `cybling/Birth/main.md`.

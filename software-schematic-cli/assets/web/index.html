@@ -5,14 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <title>Software Schematic</title>
-    <script type="module" crossorigin src="./vendor/index-Dx4KV6fu.js"></script>
-    <link rel="stylesheet" crossorigin href="./vendor/index-CBUjKPZg.css">
+    <script type="module" crossorigin src="./vendor/index-BxcMrK5l.js"></script>
+    <link rel="stylesheet" crossorigin href="./vendor/index-DRP67pqz.css">
   </head>
   <body>
     <div id="app" class="app-shell">
       <header class="topbar">
         <div class="brand"><span class="brand-mark">SS</span><span>Software Schematic</span></div>
         <div class="topbar-actions">
+          <button id="new-cmmn" class="secondary-button compact" title="Create or open a CMMN business anchor">New CMMN anchor</button>
+          <button id="return-to-anchor" class="secondary-button compact hidden" title="Return to the originating CMMN business need">Return to business need</button>
           <button id="assistant-revert" class="secondary-button compact hidden" title="Revert the most recent assistant change">Revert assistant change</button>
           <button id="fit-view" class="icon-button" title="Enter full screen" aria-label="Enter full screen" aria-pressed="false"><i data-lucide="maximize-2"></i></button>
           <div id="save-status" class="save-status saved" role="status"><span class="status-dot"></span><span>Saved</span></div>
@@ -31,9 +33,8 @@
               <label class="field field-id"><span>ID</span><input id="element-id" autocomplete="off" /></label>
               <label class="field"><span>Type</span><input id="element-type" readonly /></label>
               <label class="field field-wide"><span>Label</span><input id="element-label" autocomplete="off" /></label>
-              <label class="field field-wide"><span>Documentation</span><input id="documentation-path" readonly /></label>
-              <label id="node-status-field" class="field field-wide hidden"><span>LLM status</span><select id="node-status"><option value="open">Open</option><option value="new">New</option><option value="locked">Locked</option><option value="modify">Modify</option></select><small id="node-status-meaning"></small></label>
-              <label id="called-element-field" class="field field-wide hidden"><span>External process</span><input id="called-element" placeholder="order" autocomplete="off" /></label>
+              <label id="element-name-field" class="field field-wide"><span>Name</span><input id="element-name" autocomplete="off" /></label>
+              <label id="node-status-field" class="field field-wide hidden"><span>Implementation Status</span><select id="node-status"><option value="open">Open</option><option value="new">New</option><option value="locked">Locked</option><option value="modify">Modify</option></select><small id="node-status-meaning"></small></label>
             </div>
             <button id="open-composition" class="secondary-button hidden"><i data-lucide="external-link"></i><span>Open composition</span></button>
           </section>
@@ -48,6 +49,16 @@
         </aside>
       </main>
       <div id="toast" class="toast hidden" role="alert"></div>
+      <div id="process-name-modal" class="modal-backdrop hidden" role="presentation">
+        <form id="process-name-form" class="name-dialog" role="dialog" aria-modal="true" aria-labelledby="process-name-title">
+          <div class="eyebrow">Reusable subprocess</div>
+          <h2 id="process-name-title">Name this process</h2>
+          <p>Enter the complete process Name. This Name identifies the shared subprocess and determines its folder.</p>
+          <label class="assistant-prompt"><span>Name</span><input id="process-name-input" autocomplete="off" placeholder="Process" /></label>
+          <div id="process-name-error" class="assistant-error hidden" role="alert"></div>
+          <footer class="assistant-actions"><button id="process-name-cancel" type="button" class="secondary-button">Cancel</button><button type="submit" class="primary-button">Open subprocess</button></footer>
+        </form>
+      </div>
       <div id="assistant-modal" class="modal-backdrop hidden" role="presentation">
         <section class="assistant-dialog" role="dialog" aria-modal="true" aria-labelledby="assistant-title">
           <header class="assistant-header"><div><div class="eyebrow">AI assistant</div><h2 id="assistant-title">Suggest diagram changes</h2></div><button id="assistant-close" class="icon-button" aria-label="Close assistant"><i data-lucide="x"></i></button></header>

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Provide a polished, self-contained browser workspace for editing, documenting, and automatically saving BPMN compositions.
+Provide a polished, self-contained browser workspace for editing, documenting, and automatically saving CMMN business anchors and BPMN compositions.
 
 ## Requirements
 
@@ -11,7 +11,7 @@ The web application SHALL present a polished, responsive diagram column on the l
 
 #### Scenario: Application opens
 - **WHEN** the initialized application loads successfully
-- **THEN** it displays `schematics/main.bpmn` in the left editor and the current diagram documentation in the right column
+- **THEN** it displays the project's sole root anchor in the left editor and the current diagram documentation in the right column
 
 #### Scenario: Workspace is resized
 - **WHEN** the browser viewport changes within the supported desktop range
@@ -35,12 +35,12 @@ The initialized application SHALL load all browser code, styles, fonts, icons, a
 - **WHEN** the wrapper launches in an offline environment
 - **THEN** the complete styled interface and all editing and rendering libraries load from the initialized project
 
-### Requirement: Tabbed BPMN editing
-The diagram column SHALL provide one retained, selectable editor tab per canonical BPMN path and SHALL use bundled `bpmn-js` assets to render and edit each diagram. The project's normalized root `schematics/main.bpmn` tab SHALL remain open as the navigation entry point and SHALL NOT expose an actionable close control or be removable through the tab-close operation. Every other diagram tab, including a nested composition named `main.bpmn`, SHALL display a keyboard-accessible `x` close control. Closing a permitted tab SHALL remove that retained editor session and release its UI/modeler resources without changing other open sessions; when an active auxiliary tab closes, the application SHALL select the nearest remaining tab, preferring the next tab and otherwise the previous tab. The application SHALL safely flush queued automatic persistence for the closing tab before releasing it.
+### Requirement: Tabbed diagram editing
+The diagram column SHALL provide one retained, selectable editor tab per complete canonical `.cmmn` or `.bpmn` path and SHALL use the corresponding bundled modeler to render and edit each diagram. The project's normalized sole root anchor tab SHALL remain open as the navigation entry point and SHALL NOT expose an actionable close control or be removable through the tab-close operation. Every other diagram tab SHALL display a keyboard-accessible `x` close control. Closing a permitted tab SHALL remove that retained editor session and release its UI/modeler resources without changing other open sessions; when an active auxiliary tab closes, the application SHALL select the nearest remaining tab, preferring the next tab and otherwise the previous tab. The application SHALL safely flush queued automatic persistence for the closing tab before releasing it.
 
 #### Scenario: Multiple diagrams are opened
-- **WHEN** the user opens BPMN files with different canonical paths
-- **THEN** each file has one retained tab, switching tabs preserves each editor session, and every tab except root `schematics/main.bpmn` has a visible `x` close control
+- **WHEN** the user opens supported diagram files with different canonical paths
+- **THEN** each file has one retained tab, switching tabs preserves each editor session, and every tab except the sole root anchor has a visible `x` close control
 
 #### Scenario: An open diagram is requested again
 - **WHEN** the application requests a BPMN path that already has a tab
@@ -55,23 +55,27 @@ The diagram column SHALL provide one retained, selectable editor tab per canonic
 - **THEN** the application flushes its queued persistence, releases its editor, and activates the next tab or the previous tab when no next tab exists
 
 #### Scenario: Root main diagram is displayed
-- **WHEN** the project root `schematics/main.bpmn` tab is open
+- **WHEN** the project root anchor tab is open
 - **THEN** it has no actionable `x` control and the tab-close operation refuses to remove its editor session
 
 #### Scenario: Last auxiliary tab is closed
 - **WHEN** the user closes the only auxiliary tab
-- **THEN** the application releases that editor session and returns to the retained root `schematics/main.bpmn` tab
+- **THEN** the application releases that editor session and returns to the retained root anchor tab
 
 #### Scenario: Nested main diagram is displayed
 - **WHEN** a composition opens a nested path such as `schematics/orders/main.bpmn`
 - **THEN** that tab has an actionable `x` control because protection is based on the normalized root path rather than the filename
 
 ### Requirement: Compact selected-item metadata
-The top of the right column SHALL display the selected diagram item's ID, label, BPMN type, and derived Markdown documentation path in a compact form; ID and label SHALL be editable and type and documentation path SHALL be read-only.
+The inspector SHALL expose exactly ID, Type, Label, Name, Implementation Status, and Documentation for a selected diagram element. ID, Label, Name, Implementation Status, and Documentation SHALL be editable when applicable; Type SHALL be read-only. Documentation SHALL be the Markdown editing surface, not a path field. The editor SHALL NOT expose Qualified Name, Documentation path, or External process fields.
 
 #### Scenario: User selects a BPMN node or edge
 - **WHEN** a BPMN node or edge is selected in the active editor
-- **THEN** the metadata header displays values derived from that element and its composition folder
+- **THEN** the inspector shows ID, Type, Label, Name, Implementation Status, and its Documentation editor
+
+#### Scenario: User edits Name
+- **WHEN** the user enters a valid short parent-scoped Name or fully qualified override
+- **THEN** the authored Name is stored and its resolved identity determines the associated composition while Documentation remains ID-bound
 
 #### Scenario: User updates an element label
 - **WHEN** the user changes the selected element's label in the metadata header
@@ -81,11 +85,26 @@ The top of the right column SHALL display the selected diagram item's ID, label,
 - **WHEN** the user submits a valid unused BPMN ID
 - **THEN** the model adopts the ID and any existing documentation file is renamed from the old ID to the new ID without overwriting another file
 
+### Requirement: Name required before subprocess navigation
+When a user opens a call activity, subprocess, or CMMN Process Task by double-clicking it or selecting its composition link and the element has no Name, the editor SHALL show a modal dialog that collects a valid short process Name or fully qualified `package.Process` override. A short Name SHALL inherit the parent diagram package. The editor SHALL NOT generate a fallback Name or create a composition until the user submits a valid Name.
+
+#### Scenario: Unnamed subprocess is opened
+- **WHEN** the user double-clicks an unnamed subprocess or selects its subprocess link icon
+- **THEN** a Name dialog opens and the composition remains unopened
+
+#### Scenario: Valid Name is submitted
+- **WHEN** the user submits `sales.checkout.PlaceOrder`
+- **THEN** the exact Name is stored on the element and the shared subprocess composition opens
+
+#### Scenario: Name dialog is cancelled
+- **WHEN** the user cancels the Name dialog
+- **THEN** the subprocess remains unnamed and no composition is created
+
 ### Requirement: Markdown display and source editing
 The remainder of the right column SHALL render the selected item's Markdown by default and SHALL provide an edit icon that switches between rendered content and Markdown source.
 
 #### Scenario: Documentation is viewed
-- **WHEN** a diagram or BPMN element becomes the current documentation target
+- **WHEN** a diagram or supported BPMN or CMMN element becomes the current documentation target
 - **THEN** its Markdown is rendered, including Mermaid fenced blocks rendered as diagrams
 
 #### Scenario: User enters documentation edit mode
@@ -112,7 +131,7 @@ The local server SHALL expose the initialized project's directory basename as re
 - **THEN** the browser title remains `Software Schematic`
 
 ### Requirement: Fullscreen workspace control
-The SSW top bar SHALL provide a fullscreen control that uses the browser Fullscreen API to enter fullscreen for the application shell and exit the document's fullscreen state. The control SHALL derive its state from the document's actual fullscreen element, SHALL show a maximize icon labeled `Enter full screen` when windowed, and SHALL show a minimize icon labeled `Exit full screen` while fullscreen. Following each fullscreen transition, the application SHALL resize and fit the active BPMN canvas to its changed viewport. Unsupported or rejected fullscreen operations SHALL leave the current state intact and report an actionable failure.
+The SSW top bar SHALL provide a fullscreen control that uses the browser Fullscreen API to enter fullscreen for the application shell and exit the document's fullscreen state. The control SHALL derive its state from the document's actual fullscreen element, SHALL show a maximize icon labeled `Enter full screen` when windowed, and SHALL show a minimize icon labeled `Exit full screen` while fullscreen. Following each fullscreen transition, the application SHALL resize and fit the active diagram canvas to its changed viewport. Unsupported or rejected fullscreen operations SHALL leave the current state intact and report an actionable failure.
 
 #### Scenario: User enters fullscreen
 - **WHEN** the application is windowed and the user activates `Enter full screen`
@@ -145,11 +164,11 @@ The Markdown panel SHALL show rendered Markdown in read mode and editable Markdo
 - **WHEN** a user navigates the Markdown mode control with assistive technology or cannot identify the icon
 - **THEN** the control announces `Edit Markdown` in read mode or `Read Markdown` in edit mode
 
-### Requirement: LLM node authoring status
-The SSW editor SHALL let a user assign exactly one status of `new`, `locked`, `modify`, or `open` to each eligible BPMN node in an open tab. The statuses SHALL mean, respectively, that an LLM is being asked to create the represented work/content, must not change the node, is allowed and expected to change the node, or receives no hint. A node with no assigned or recognized status SHALL be treated as `open`. Status SHALL remain an authoring hint and SHALL NOT prevent manual editing. Until GrafeoDB persistence is implemented, status SHALL be client-side state scoped to the lifetime of the open tab and SHALL NOT be written to BPMN XML or Markdown.
+### Requirement: Implementation Status
+The SSW editor SHALL let a user assign exactly one Implementation Status of `new`, `locked`, `modify`, or `open` to each eligible BPMN or CMMN node or edge in an open tab. The statuses SHALL mean, respectively, that an assistant is being asked to create the represented work/content, must not change the element, is allowed and expected to change the element, or receives no hint. An element with no assigned or recognized status SHALL be treated as `open`. Status SHALL remain an authoring hint and SHALL NOT prevent manual editing. Until persistence is implemented, status SHALL be client-side state scoped to the lifetime of the open tab and SHALL NOT be written to diagram XML or Markdown.
 
-#### Scenario: User selects an eligible node
-- **WHEN** the user selects a BPMN shape node in the active editor
+#### Scenario: User selects an eligible element
+- **WHEN** the user selects a BPMN node or edge in the active editor
 - **THEN** the selected-item metadata displays its current status and a textual explanation of the corresponding LLM hint
 
 #### Scenario: User changes node status
@@ -157,8 +176,8 @@ The SSW editor SHALL let a user assign exactly one status of `new`, `locked`, `m
 - **THEN** the application updates that node's client-side status immediately without preventing manual edits or scheduling BPMN or Markdown persistence
 
 #### Scenario: Unsupported element is selected
-- **WHEN** the current selection is a connection, label, diagram root, or no element
-- **THEN** the status control is unavailable and no node status changes
+- **WHEN** the current selection is a label, diagram root, or no element
+- **THEN** the status control is unavailable and no element status changes
 
 #### Scenario: Tab is reopened before persistence exists
 - **WHEN** a tab containing client-side node statuses is closed and its diagram is opened again
@@ -180,11 +199,11 @@ The editor SHALL render the primary fill of an eligible node green for `new`, gr
 - **THEN** its status fill remains understandable and its existing interaction outline or marker remains visible
 
 ### Requirement: Automatic persistence
-The application SHALL automatically save changed BPMN XML and Markdown after a short debounce, SHALL serialize writes to each path, and SHALL show whether the current content is pending, saved, or failed.
+The application SHALL automatically save changed CMMN or BPMN XML and Markdown after a short debounce, SHALL serialize writes to each path, and SHALL show whether the current content is pending, saved, or failed.
 
-#### Scenario: BPMN model changes
-- **WHEN** the user completes one or more BPMN mutations
-- **THEN** the latest model is serialized to BPMN XML and saved to its original path without a manual save action
+#### Scenario: Diagram model changes
+- **WHEN** the user completes one or more supported CMMN or BPMN mutations
+- **THEN** the latest model is serialized to its diagram XML format and saved to its original path without a manual save action
 
 #### Scenario: Markdown source changes
 - **WHEN** the user pauses after editing Markdown source
@@ -195,7 +214,7 @@ The application SHALL automatically save changed BPMN XML and Markdown after a s
 - **THEN** the application shows a failed state and does not report the affected revision as saved
 
 ### Requirement: Typed local file operations
-The Rust server SHALL expose only the project-metadata read, diagram listing, BPMN read/write, Markdown read/write, metadata rename, and composition-resolution operations required by the web application; SHALL return only the project directory basename from project metadata rather than its absolute path; and SHALL replace a saved file only after receiving complete content.
+The Rust server SHALL expose only the project-metadata read, diagram listing, confined CMMN and BPMN read/write, Markdown read/write, metadata rename, and composition-resolution operations required by the web application; SHALL return only the project directory basename from project metadata rather than its absolute path; and SHALL replace a saved file only after receiving complete content.
 
 #### Scenario: Project metadata is read
 - **WHEN** the browser requests project metadata
@@ -206,7 +225,7 @@ The Rust server SHALL expose only the project-metadata read, diagram listing, BP
 - **THEN** it writes a temporary sibling and replaces the target with the complete content
 
 ### Requirement: AI assistant palette entry points
-The SSW editor SHALL display a magic assistant action in the context palette of every eligible BPMN shape node and a magic assistant action in the persistent diagram palette. The node action SHALL open an assistant dialog identified as scoped to that node; the diagram action SHALL open the same dialog identified as scoped to the complete active diagram. Both actions SHALL provide accessible names, tooltips, keyboard operation, focus management, and visible hover/focus states consistent with existing palette controls.
+The SSW editor SHALL display a magic assistant action in the context palette of every eligible supported diagram shape node and a magic assistant action in the persistent diagram palette. The node action SHALL open an assistant dialog identified as scoped to that node; the diagram action SHALL open the same dialog identified as scoped to the complete active diagram. Both actions SHALL provide accessible names, tooltips, keyboard operation, focus management, and visible hover/focus states consistent with existing palette controls.
 
 #### Scenario: User invokes node assistance
 - **WHEN** the user activates the magic action in an eligible node's context palette
@@ -223,3 +242,31 @@ The SSW editor SHALL display a magic assistant action in the context palette of 
 #### Scenario: Assistant dialog is dismissed
 - **WHEN** the user cancels or closes the assistant dialog before approving a proposal
 - **THEN** focus returns to the invoking palette control and no diagram or documentation content changes
+
+### Requirement: CMMN-rooted tabbed editing
+The diagram column SHALL open `main.cmmn` as the retained project-root tab and SHALL open linked BPMN designs as auxiliary tabs. Shared tab controls, breadcrumbs, inspector, Markdown panel, automatic persistence, and save status SHALL operate according to the active diagram type.
+
+#### Scenario: BPMN design opens beside CMMN root
+- **WHEN** a user opens `cybling.sdk.Birth` from the root CMMN anchor
+- **THEN** the BPMN file receives one selectable auxiliary tab and the root CMMN tab remains retained
+
+### Requirement: Diagram-type-aware controls
+The editor SHALL obtain supported element creation, connection, composition, metadata, and modeler operations from the active diagram adapter. It SHALL hide or disable an operation that has no supported equivalent for the active CMMN element rather than applying a BPMN-specific command.
+
+#### Scenario: Unsupported CMMN operation is inspected
+- **WHEN** the selected CMMN element does not support a BPMN-only action
+- **THEN** the editor does not present that action as available and does not mutate the diagram
+
+### Requirement: CMMN magic actions
+The editor SHALL display the existing diagram-scoped magic action for an active CMMN diagram and the existing node-scoped magic action for eligible CMMN elements. Each action SHALL use the same prompt, preview, approval, rejection, error, and revert experience as BPMN.
+
+#### Scenario: User invokes CMMN node magic action
+- **WHEN** a user invokes the magic action on an eligible CMMN Process Task
+- **THEN** the assistant dialog identifies that element and its owning CMMN package as the request scope
+
+### Requirement: Business context remains navigable
+When a BPMN design is opened from a CMMN Process Task, the editor SHALL retain the originating CMMN tab and SHALL present the two documents as a need-to-design navigation relationship without requiring an intermediate CMMN package diagram.
+
+#### Scenario: Linked BPMN tab opens
+- **WHEN** a user opens `cybling.sdk.Birth` from a Process Task in `cybling/main.cmmn`
+- **THEN** both tabs remain available and the user can return directly to the CMMN business context

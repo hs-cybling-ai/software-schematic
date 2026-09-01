@@ -1,11 +1,11 @@
-import Modeler from 'bpmn-js/lib/Modeler';
 import 'bpmn-js/dist/assets/diagram-js.css';
 import 'bpmn-js/dist/assets/bpmn-font/css/bpmn.css';
 import MarkdownIt from 'markdown-it';
 import DOMPurify from 'dompurify';
 import mermaid from 'mermaid';
 import { createIcons, BookOpen, ExternalLink, Maximize2, Minimize2, PencilLine, X } from 'lucide';
-import { compositionBreadcrumbs, compositionIdentity, compositionPathFor, compositionSlug, documentationPath, isRootDiagram, NODE_STATUSES, normalizeCompositionPath, normalizeNodeStatus, projectDocumentTitle, RevisionQueue } from './core.js';
+import { architecturalName, cmmnFolderForPackageName, cmmnPathForPackageName, compositionBreadcrumbs, compositionFolderForQualifiedName, compositionIdentity, compositionPathFor, diagramKind, documentationPath, isRootDiagram, NODE_STATUSES, normalizeNodeStatus, owningProcessName, packageNameForCmmnPath, projectDocumentTitle, qualifiedSymbolFor, resolveBpmnElementName, resolveCmmnElementName, RevisionQueue, selectProjectAnchor, validatePackageName, validateQualifiedProcessName } from './core.js';
+import { createDiagramAdapter } from './diagram-adapters.ts';
 import { buildContextSnapshot, isAssistantEligible, proposalGroups, stableRevision, validateProposal } from './assistant.js';
 import './styles.css';
 
@@ -27,6 +27,7 @@ let selectedElement = null;
 let editingMarkdown = false;
 let markdownTimer = null;
 let assistantProvider = 'fake';
+let projectAnchorPath = 'main.cmmn';
 const queue = new RevisionQueue(writeFile, setSaveState);
 
 const DEFAULT_ACTIVITY_WIDTH = 100;
@@ -88,7 +89,8 @@ function AssistantContextPadProvider(contextPad) {
       action: { click: (event) => window.dispatchEvent(new CustomEvent('ssw:assistant', { detail: { scope: 'node', elementId: element.id, invoker: event.currentTarget || event.target?.closest?.('.entry') || event.target } })) },
     },
   } : {};
-  contextPad.registerProvider(500, this);
+  if (contextPad.registerProvider.length === 1) contextPad.registerProvider(this);
+  else contextPad.registerProvider(500, this);
 }
 AssistantContextPadProvider.$inject = ['contextPad'];
 
@@ -96,6 +98,24 @@ const compositionPaletteModule = {
   __init__: ['compositionPaletteProvider', 'compositionAutoPlaceProvider', 'assistantContextPadProvider'],
   compositionPaletteProvider: ['type', CompositionPaletteProvider],
   compositionAutoPlaceProvider: ['type', CompositionAutoPlaceProvider],
+  assistantContextPadProvider: ['type', AssistantContextPadProvider],
+};
+
+function CmmnAssistantPaletteProvider(palette) {
+  this.getPaletteEntries = () => ({
+    'ai.diagram-assistant': {
+      group: 'tools', className: 'ai-assistant-entry', title: 'Suggest changes to the complete business-need diagram',
+      action: { click: (event) => window.dispatchEvent(new CustomEvent('ssw:assistant', { detail: { scope: 'diagram', invoker: event.currentTarget || event.target?.closest?.('.entry') || event.target } })) },
+    },
+  });
+  if (palette.registerProvider.length === 1) palette.registerProvider(this);
+  else palette.registerProvider(500, this);
+}
+CmmnAssistantPaletteProvider.$inject = ['palette'];
+
+const cmmnAssistantModule = {
+  __init__: ['cmmnAssistantPaletteProvider', 'assistantContextPadProvider'],
+  cmmnAssistantPaletteProvider: ['type', CmmnAssistantPaletteProvider],
   assistantContextPadProvider: ['type', AssistantContextPadProvider],
 };
 
@@ -142,9 +162,8 @@ function replaceIcon(button, name) {
   createIcons({ icons });
 }
 
-function isStatusEligible(element) {
-  const business = element?.businessObject;
-  return Boolean(element && !element.waypoints && !element.labelTarget && business?.$type && !['bpmn:Process', 'bpmn:Collaboration', 'bpmn:Definitions'].includes(business.$type));
+function isStatusEligible(element, tab = activeTab) {
+  return Boolean(tab?.adapter?.isStatusEligible(element));
 }
 
 function statusFor(tab, element) {
@@ -152,7 +171,7 @@ function statusFor(tab, element) {
 }
 
 function applyNodeStatus(tab, element) {
-  if (!tab || !isStatusEligible(element)) return;
+  if (!tab || !isStatusEligible(element, tab)) return;
   const canvas = tab.modeler.get('canvas');
   Object.keys(NODE_STATUSES).forEach((status) => canvas.removeMarker(element, `node-status-${status}`));
   const status = statusFor(tab, element);
@@ -163,8 +182,10 @@ function applyNodeStatus(tab, element) {
 }
 
 function businessLabel(element) {
+  const adapted = activeTab?.adapter?.elementLabel(element);
+  if (adapted) return adapted;
   const business = element?.businessObject;
-  return business?.name || business?.id || business?.$type?.replace('bpmn:', '') || 'Diagram node';
+  return business?.name || business?.definitionRef?.name || business?.id || business?.$type?.replace(/^[^:]+:/, '') || 'Diagram node';
 }
 
 function enhanceAssistantEntries(container) {
@@ -180,15 +201,29 @@ function enhanceAssistantEntries(container) {
   });
 }
 
-async function openDiagram(path) {
-  if (tabs.has(path)) return activateTab(tabs.get(path));
+async function openDiagram(path, originPath = null) {
+  if (tabs.has(path)) {
+    const existing = tabs.get(path);
+    if (originPath && !existing.originPath) existing.originPath = originPath;
+    return activateTab(existing);
+  }
   const xml = await readFile(path);
   const container = document.createElement('div');
   container.className = 'diagram-canvas hidden';
   container.dataset.path = path;
   $('#canvases').append(container);
-  const modeler = new Modeler({ container, additionalModules: [compositionPaletteModule] });
-  await modeler.importXML(xml);
+  let adapter;
+  let imported;
+  try {
+    adapter = await createDiagramAdapter(path, container, { bpmn: [compositionPaletteModule], cmmn: [cmmnAssistantModule] });
+    imported = await adapter.importXML(xml);
+  } catch (error) {
+    adapter?.destroy();
+    container.remove();
+    throw new Error(`Could not open ${path}: ${error.message}`);
+  }
+  const modeler = adapter.modeler;
+  if (imported?.warnings?.length) showToast(`Opened with ${imported.warnings.length} CMMN import warning${imported.warnings.length === 1 ? '' : 's'}`);
   enhanceAssistantEntries(container);
   const tabElement = document.createElement('div');
   tabElement.className = 'tab';
@@ -201,7 +236,7 @@ async function openDiagram(path) {
   tabButton.innerHTML = `<span class="tab-dot"></span><span>${identity.name}</span>`;
   tabButton.addEventListener('click', () => activateTab(tab));
   tabElement.append(tabButton);
-  const tab = { path, modeler, container, tabElement, tabButton, nodeStatuses: new Map(), diagramTimer: null };
+  const tab = { path, adapter, modeler, container, tabElement, tabButton, nodeStatuses: new Map(), diagramTimer: null, originPath };
   if (!isRootDiagram(path)) {
     const closeButton = document.createElement('button');
     closeButton.className = 'tab-close';
@@ -224,16 +259,19 @@ async function openDiagram(path) {
     if (!button) return;
     const elementId = button.closest('.djs-overlays')?.dataset.containerId;
     const element = elementId ? modeler.get('elementRegistry').get(elementId) : null;
-    if (!element || !['bpmn:CallActivity', 'bpmn:SubProcess'].includes(element.businessObject?.$type)) return;
+    if (!element || !adapter.isComposable(element)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     openElementComposition(element);
   }, true);
   eventBus.on('selection.changed', ({ newSelection }) => { if (activeTab === tab) selectElement(newSelection[0] || null); });
-  eventBus.on('commandStack.changed', () => scheduleDiagramSave(tab));
+  eventBus.on('commandStack.changed', () => {
+    scheduleDiagramSave(tab);
+    if (activeTab === tab) $('#element-label').value = selectedElement ? tab.adapter.elementLabel(selectedElement) : '';
+  });
   eventBus.on('element.dblclick', 5000, (event) => {
     const { element } = event;
-    if (['bpmn:CallActivity', 'bpmn:SubProcess'].includes(element.businessObject?.$type)) {
+    if (adapter.isComposable(element)) {
       event.preventDefault();
       event.stopPropagation();
       openElementComposition(element);
@@ -251,6 +289,7 @@ async function activateTab(tab) {
   }
   activeTab = tab;
   selectedElement = null;
+  $('#return-to-anchor')?.classList.toggle('hidden', !tab.originPath || !tabs.has(tab.originPath));
   renderBreadcrumbs(tab.path);
   tab.modeler.get('canvas').resized();
   tab.modeler.get('canvas').zoom('fit-viewport');
@@ -272,13 +311,13 @@ async function closeTab(tab) {
   tabs.delete(tab.path);
   clearTimeout(tab.diagramTimer);
   tab.nodeStatuses.clear();
-  tab.modeler.destroy();
+  tab.adapter.destroy();
   tab.container.remove();
   tab.tabElement.remove();
   if (wasActive) {
     activeTab = null;
     selectedElement = null;
-    const next = ordered[index + 1] || ordered[index - 1] || tabs.get('main.bpmn');
+    const next = ordered[index + 1] || ordered[index - 1] || tabs.get(projectAnchorPath);
     if (next && next !== tab) await activateTab(next);
   }
   return true;
@@ -287,7 +326,7 @@ async function closeTab(tab) {
 function renderBreadcrumbs(diagramPath) {
   const container = $('#breadcrumbs');
   container.replaceChildren();
-  const items = compositionBreadcrumbs(diagramPath);
+  const items = compositionBreadcrumbs(diagramPath, projectAnchorPath);
   items.forEach((item, index) => {
     if (index > 0) {
       const separator = document.createElement('span');
@@ -318,23 +357,26 @@ function selectElement(element) {
 async function updateInspector() {
   if (!activeTab) return;
   const business = selectedElement?.businessObject;
+  const elementId = activeTab.adapter.elementId(selectedElement);
+  const elementLabel = activeTab.adapter.elementLabel(selectedElement);
   const identity = compositionIdentity(activeTab.path);
-  $('#element-id').value = business?.id || '';
-  $('#element-label').value = business?.name || identity.name;
-  $('#element-type').value = business?.$type?.replace('bpmn:', '') || 'Diagram';
-  const docPath = documentationPath(activeTab.path, business?.id);
-  $('#documentation-path').value = docPath;
-  $('#documentation-title').textContent = business?.name || business?.id || identity.name;
-  const isCall = business?.$type === 'bpmn:CallActivity';
-  const isSubProcess = business?.$type === 'bpmn:SubProcess';
-  const composable = isCall || isSubProcess || business?.$type === 'bpmn:Participant' || business?.$type === 'bpmn:Lane';
-  $('#called-element-field').classList.toggle('hidden', !(isCall || isSubProcess));
+  $('#element-id').value = elementId;
+  $('#element-label').value = selectedElement ? elementLabel : '';
+  $('#element-type').value = selectedElement ? activeTab.adapter.displayType(selectedElement) : activeTab.adapter.kind === 'cmmn' ? 'CMMN Package' : 'Diagram';
+  const childDiagram = !selectedElement && !isRootDiagram(activeTab.path);
+  const nameEligible = childDiagram || Boolean(selectedElement && activeTab.adapter.isSelectable(selectedElement));
+  $('#element-name-field').classList.toggle('hidden', !nameEligible);
+  const diagramQualifiedName = childDiagram ? (activeTab.adapter.kind === 'cmmn' ? packageNameForCmmnPath(activeTab.path) : owningProcessName(activeTab.path)) : '';
+  $('#element-name').value = childDiagram ? diagramQualifiedName : activeTab.adapter.elementName(selectedElement);
+  const elementName = activeTab.adapter.elementName(selectedElement);
+  const docPath = documentationPath(activeTab.path, elementId);
+  $('#documentation-title').textContent = elementLabel || elementId || identity.name;
+  const composable = activeTab.adapter.isComposable(selectedElement) && Boolean(elementName) && !elementName.includes('#');
   $('#open-composition').classList.toggle('hidden', !composable);
-  $('#called-element').value = isCall ? business.calledElement || '' : isSubProcess && business.name ? compositionSlug(business.name) : '';
-  $('#called-element').readOnly = isSubProcess;
-  $('#element-id').disabled = !business;
+  $('#element-name').disabled = !nameEligible;
+  $('#element-id').disabled = !selectedElement;
   $('#element-label').disabled = false;
-  $('#element-label').readOnly = !business;
+  $('#element-label').readOnly = !selectedElement;
   const statusEligible = isStatusEligible(selectedElement);
   $('#node-status-field').classList.toggle('hidden', !statusEligible);
   if (statusEligible) {
@@ -366,7 +408,7 @@ async function flushDiagram(tab) {
   if (tab.diagramTimer) {
     clearTimeout(tab.diagramTimer);
     tab.diagramTimer = null;
-    const { xml } = await tab.modeler.saveXML({ format: true });
+    const { xml } = await tab.adapter.saveXML({ format: true });
     await queue.enqueue(tab.path, xml);
   }
   await queue.waitFor(tab.path);
@@ -381,14 +423,16 @@ function scheduleMarkdownSave() {
 async function flushMarkdown() {
   clearTimeout(markdownTimer);
   markdownTimer = null;
-  const path = $('#documentation-path').value;
+  const path = activeTab ? documentationPath(activeTab.path, activeTab.adapter.elementId(selectedElement)) : '';
   if (!path) return;
   await queue.enqueue(path, $('#markdown-source').value);
 }
 
 async function updateBusinessProperty(property, value) {
   if (!selectedElement) return;
-  activeTab.modeler.get('modeling').updateProperties(selectedElement, { [property]: value || undefined });
+  if (property === 'name') activeTab.adapter.updateLabel(selectedElement, value || undefined);
+  else if (property === 'id') activeTab.adapter.updateId(selectedElement, value);
+  else activeTab.modeler.get('modeling').updateProperties(selectedElement, { [property]: value || undefined });
 }
 
 const assistant = { scope: null, element: null, invoker: null, controller: null, snapshot: null, proposal: null, lastBeforeState: null };
@@ -494,7 +538,7 @@ async function applyAssistantProposal(proposal) {
   const diagramPaths = new Set([activeTab.path, ...proposal.operations.map((op) => op.diagramPath).filter(Boolean)]);
   for (const path of diagramPaths) {
     const tab = tabs.get(path);
-    if (tab) before.diagrams.set(path, (await tab.modeler.saveXML({ format: true })).xml);
+    if (tab) before.diagrams.set(path, (await tab.adapter.saveXML({ format: true })).xml);
   }
   const markdownOps = proposal.operations.filter((op) => op.type === 'replace_diagram_markdown' || op.type === 'replace_node_markdown');
   for (const operation of markdownOps) {
@@ -502,24 +546,37 @@ async function applyAssistantProposal(proposal) {
     before.documents.set(path, await readFile(path, true));
   }
   try {
-    for (const operation of proposal.operations.filter((op) => op.type === 'create_composition' || op.type === 'open_composition')) {
-      const result = await api('/api/compositions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: operation.path }) });
+    for (const operation of proposal.operations.filter((op) => op.type === 'create_process' || op.type === 'open_process')) {
+      const result = await api('/api/compositions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'bpmn', qualified_name: operation.qualifiedName }) });
       await openDiagram(result.diagram);
       if (!before.diagrams.has(result.diagram)) before.diagrams.set(result.diagram, null);
     }
     for (const operation of proposal.operations) {
-      if (['create_composition', 'open_composition'].includes(operation.type)) continue;
+      if (['create_process', 'open_process'].includes(operation.type)) continue;
       const tab = tabs.get(operation.diagramPath || assistant.snapshot.diagramPath) || activeTab;
       const registry = tab.modeler.get('elementRegistry'); const modeling = tab.modeler.get('modeling');
       if (operation.type === 'replace_node_type') tab.modeler.get('bpmnReplace').replaceElement(registry.get(operation.nodeId), { type: operation.bpmnType });
-      else if (operation.type === 'update_node_label') modeling.updateProperties(registry.get(operation.nodeId), { name: operation.label });
-      else if (operation.type === 'set_composition_link') modeling.updateProperties(registry.get(operation.nodeId), { calledElement: operation.path });
+      else if (operation.type === 'update_node_label') tab.adapter.updateLabel(registry.get(operation.nodeId), operation.label);
+      else if (operation.type === 'update_node_name') tab.adapter.updateName(registry.get(operation.nodeId), operation.name);
+      else if (operation.type === 'set_process_reference') tab.adapter.updateName(registry.get(operation.nodeId), operation.qualifiedName);
+      else if (operation.type === 'rename_process') {
+        await api('/api/process-renames', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ old_qualified_name: operation.oldQualifiedName, new_qualified_name: operation.newQualifiedName }) });
+      }
       else if (operation.type === 'add_flow_node') {
         const elementFactory = tab.modeler.get('elementFactory'); const root = tab.modeler.get('canvas').getRootElement();
         const shape = elementFactory.createShape({ type: operation.bpmnType, id: operation.nodeId });
         const created = modeling.createShape(shape, { x: operation.x || 180, y: operation.y || 160 }, root);
-        if (operation.label) modeling.updateProperties(created, { name: operation.label });
+        modeling.updateProperties(created, { name: operation.label || undefined, architecturalName: operation.name || undefined });
       } else if (operation.type === 'connect_sequence_flow') modeling.connect(registry.get(operation.sourceId), registry.get(operation.targetId), { type: 'bpmn:SequenceFlow', id: operation.flowId });
+      else if (operation.type === 'add_plan_item') {
+        const elementFactory = tab.modeler.get('elementFactory'); const root = tab.modeler.get('canvas').getRootElement();
+        const shape = elementFactory.createPlanItemShape(operation.cmmnType);
+        const created = modeling.createShape(shape, { x: operation.x || 220, y: operation.y || 180 }, root);
+        modeling.updateProperties(created, { id: operation.nodeId, name: operation.label || undefined, architecturalName: operation.name || undefined });
+      } else if (operation.type === 'connect_cmmn') {
+        const connection = modeling.connect(registry.get(operation.sourceId), registry.get(operation.targetId), { type: 'cmmn:Association' });
+        if (connection && operation.connectionId) modeling.updateProperties(connection, { id: operation.connectionId });
+      }
       else if (operation.type === 'replace_diagram_markdown' || operation.type === 'replace_node_markdown') {
         const path = operation.path || (operation.type === 'replace_node_markdown' ? documentationPath(operation.diagramPath, operation.nodeId) : documentationPath(operation.diagramPath));
         await queue.enqueue(path, operation.markdown);
@@ -529,7 +586,7 @@ async function applyAssistantProposal(proposal) {
     assistant.lastBeforeState = before;
     $('#assistant-revert').classList.remove('hidden');
   } catch (error) {
-    for (const [path, xml] of before.diagrams) if (xml && tabs.has(path)) await tabs.get(path).modeler.importXML(xml);
+    for (const [path, xml] of before.diagrams) if (xml && tabs.has(path)) await tabs.get(path).adapter.importXML(xml);
     for (const [path, content] of before.documents) await queue.enqueue(path, content);
     throw error;
   }
@@ -551,7 +608,7 @@ $('#assistant-revert').addEventListener('click', async () => {
   const before = assistant.lastBeforeState;
   if (!before) return;
   try {
-    for (const [path, xml] of before.diagrams) if (xml && tabs.has(path)) { await tabs.get(path).modeler.importXML(xml); await queue.enqueue(path, xml); }
+    for (const [path, xml] of before.diagrams) if (xml && tabs.has(path)) { await tabs.get(path).adapter.importXML(xml); await queue.enqueue(path, xml); }
     for (const [path, content] of before.documents) await queue.enqueue(path, content);
     assistant.lastBeforeState = null;
     $('#assistant-revert').classList.add('hidden');
@@ -560,9 +617,75 @@ $('#assistant-revert').addEventListener('click', async () => {
   } catch (error) { showToast(`Could not revert assistant change: ${error.message}`); }
 });
 
-$('#element-label').addEventListener('change', (event) => updateBusinessProperty('name', event.target.value));
+$('#element-label').addEventListener('input', (event) => updateBusinessProperty('name', event.target.value));
+
+function validateAuthoredElementName(tab, element, value) {
+  const authoredName = String(value || '').trim();
+  const reusable = tab.adapter.isComposable(element);
+  if (tab.adapter.kind === 'cmmn') {
+    resolveCmmnElementName(authoredName, { packageName: tab.adapter.diagramName(tab.path), reusable });
+  } else {
+    resolveBpmnElementName(authoredName, { diagramPath: tab.path, reusable });
+  }
+  return authoredName;
+}
+
+$('#element-name').addEventListener('input', (event) => {
+  if (!activeTab || !selectedElement) return;
+  try {
+    const authoredName = validateAuthoredElementName(activeTab, selectedElement, event.target.value);
+    if (authoredName !== activeTab.adapter.elementName(selectedElement)) activeTab.adapter.updateName(selectedElement, authoredName);
+  } catch {}
+});
+
+$('#element-name').addEventListener('change', async (event) => {
+  const business = selectedElement?.businessObject;
+  if (!business && activeTab && !isRootDiagram(activeTab.path)) {
+    const isCmmn = activeTab.adapter.kind === 'cmmn';
+    const oldQualifiedName = isCmmn ? packageNameForCmmnPath(activeTab.path) : owningProcessName(activeTab.path);
+    try {
+      const newQualifiedName = isCmmn ? validatePackageName(event.target.value) : validateQualifiedProcessName(event.target.value);
+      const approved = globalThis.confirm(`Rename ${oldQualifiedName} to ${newQualifiedName}? This also renames its ${isCmmn ? 'package' : 'composition'} folder and local references.`);
+      if (!approved) { event.target.value = oldQualifiedName; return; }
+      for (const tab of tabs.values()) await flushDiagram(tab);
+      await api(isCmmn ? '/api/package-renames' : '/api/process-renames', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(isCmmn ? { old_package_name: oldQualifiedName, new_package_name: newQualifiedName } : { old_qualified_name: oldQualifiedName, new_qualified_name: newQualifiedName }) });
+      const oldFolder = isCmmn ? cmmnFolderForPackageName(oldQualifiedName) : compositionFolderForQualifiedName(oldQualifiedName);
+      const newFolder = isCmmn ? cmmnFolderForPackageName(newQualifiedName) : compositionFolderForQualifiedName(newQualifiedName);
+      const affectedTabs = [...tabs.values()].filter((tab) => tab.path === `${oldFolder}/main.${isCmmn ? 'cmmn' : 'bpmn'}` || (isCmmn && tab.path.startsWith(`${oldFolder}/`)));
+      for (const tab of affectedTabs) {
+        const oldPath = tab.path;
+        const newPath = oldPath.startsWith(`${oldFolder}/`) ? `${newFolder}/${oldPath.slice(oldFolder.length + 1)}` : oldPath;
+        tabs.delete(oldPath);
+        tab.path = newPath;
+        tab.container.dataset.path = newPath;
+        await tab.adapter.importXML(await readFile(newPath));
+        tabs.set(newPath, tab);
+        const identity = compositionIdentity(newPath);
+        tab.tabButton.title = identity.displayPath;
+        tab.tabButton.querySelector('span:last-child').textContent = identity.name;
+      }
+      renderBreadcrumbs(activeTab.path);
+      await updateInspector();
+      showToast(`Renamed ${isCmmn ? 'package' : 'process'} to ${newQualifiedName}`);
+    } catch (error) {
+      event.target.value = oldQualifiedName;
+      showToast(error.message);
+    }
+    return;
+  }
+  if (!business) return;
+  const previous = activeTab.adapter.elementName(selectedElement);
+  try {
+    const authoredName = validateAuthoredElementName(activeTab, selectedElement, event.target.value);
+    if (authoredName !== previous) activeTab.adapter.updateName(selectedElement, authoredName);
+    await updateInspector();
+  } catch (error) {
+    event.target.value = previous;
+    showToast(error.message);
+  }
+});
 $('#element-id').addEventListener('change', async (event) => {
-  const oldId = selectedElement?.businessObject?.id;
+  const oldId = activeTab?.adapter?.elementId(selectedElement);
   const newId = event.target.value.trim();
   if (!oldId || newId === oldId) return;
   if (!/^[A-Za-z0-9_-]+$/.test(newId)) return showToast('IDs may contain letters, digits, underscore, and hyphen');
@@ -577,13 +700,8 @@ $('#element-id').addEventListener('change', async (event) => {
     await updateInspector();
   } catch (error) { event.target.value = oldId; showToast(error.message); }
 });
-$('#called-element').addEventListener('change', (event) => {
-  if (selectedElement?.businessObject?.$type !== 'bpmn:CallActivity') return;
-  try { updateBusinessProperty('calledElement', normalizeCompositionPath(event.target.value)); }
-  catch (error) { showToast(error.message); }
-});
 $('#node-status').addEventListener('change', (event) => {
-  if (!activeTab || !isStatusEligible(selectedElement)) return;
+  if (!activeTab || !isStatusEligible(selectedElement, activeTab)) return;
   const status = normalizeNodeStatus(event.target.value);
   if (status === 'open') activeTab.nodeStatuses.delete(selectedElement.id);
   else activeTab.nodeStatuses.set(selectedElement.id, status);
@@ -593,13 +711,93 @@ $('#node-status').addEventListener('change', (event) => {
 
 async function openElementComposition(element = selectedElement) {
   try {
-    const path = compositionPathFor(element, activeTab.path);
-    const result = await api('/api/compositions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path }) });
-    await openDiagram(result.diagram);
+    const originPath = activeTab.path;
+    if (!activeTab.adapter.elementName(element)) {
+      const name = await requestProcessName(element);
+      if (!name) return;
+    }
+    const qualifiedName = activeTab.adapter.kind === 'cmmn'
+      ? resolveCmmnElementName(activeTab.adapter.elementName(element), { packageName: activeTab.adapter.diagramName(activeTab.path), reusable: true })
+      : (compositionPathFor(element, activeTab.path), qualifiedSymbolFor(element, { diagramPath: activeTab.path }));
+    const result = await api('/api/compositions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'bpmn', qualified_name: qualifiedName }) });
+    await openDiagram(result.diagram, activeTab.adapter.kind === 'cmmn' ? originPath : null);
   } catch (error) { showToast(error.message); }
 }
 
 $('#open-composition').addEventListener('click', () => openElementComposition());
+
+let pendingProcessName = null;
+function closeProcessNameDialog(value = null) {
+  $('#process-name-modal').classList.add('hidden');
+  const pending = pendingProcessName;
+  pendingProcessName = null;
+  pending?.resolve(value);
+}
+
+function requestProcessName(element) {
+  if (!element?.businessObject || !activeTab?.adapter?.isComposable(element)) return Promise.resolve(null);
+  if (pendingProcessName) closeProcessNameDialog();
+  $('#process-name-modal .eyebrow').textContent = activeTab.adapter.kind === 'cmmn' ? 'Need-to-design link' : 'Reusable subprocess';
+  $('#process-name-title').textContent = 'Name this process';
+  $('#process-name-modal p').textContent = 'Enter a short process Name to inherit this diagram package, or enter a fully qualified Name to target another package.';
+  $('#process-name-form button[type="submit"]').textContent = 'Open process';
+  $('#process-name-input').value = '';
+  $('#process-name-input').placeholder = 'Process';
+  $('#process-name-error').textContent = '';
+  $('#process-name-error').classList.add('hidden');
+  $('#process-name-modal').classList.remove('hidden');
+  globalThis.requestAnimationFrame(() => $('#process-name-input').focus());
+  return new Promise((resolve) => { pendingProcessName = { element, adapter: activeTab.adapter, diagramPath: activeTab.path, resolve }; });
+}
+
+function requestCmmnPackageName() {
+  if (pendingProcessName) closeProcessNameDialog();
+  $('#process-name-modal .eyebrow').textContent = 'Business anchor';
+  $('#process-name-title').textContent = 'Name this CMMN package';
+  $('#process-name-modal p').textContent = 'Enter a dot-separated package Name. The CMMN business anchor is stored as main.cmmn in that package folder.';
+  $('#process-name-form button[type="submit"]').textContent = 'Open CMMN anchor';
+  $('#process-name-input').value = '';
+  $('#process-name-input').placeholder = 'package.subpackage';
+  $('#process-name-error').textContent = '';
+  $('#process-name-error').classList.add('hidden');
+  $('#process-name-modal').classList.remove('hidden');
+  globalThis.requestAnimationFrame(() => $('#process-name-input').focus());
+  return new Promise((resolve) => { pendingProcessName = { mode: 'cmmn-package', resolve }; });
+}
+
+$('#process-name-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  if (!pendingProcessName) return;
+  try {
+    const name = $('#process-name-input').value.trim();
+    if (pendingProcessName.mode === 'cmmn-package') validatePackageName(name);
+    else if (pendingProcessName.adapter?.kind === 'cmmn') resolveCmmnElementName(name, { packageName: pendingProcessName.adapter.diagramName(pendingProcessName.diagramPath), reusable: true });
+    else resolveBpmnElementName(name, { diagramPath: pendingProcessName.diagramPath, reusable: true });
+    pendingProcessName.adapter?.updateName(pendingProcessName.element, name);
+    closeProcessNameDialog(name);
+  } catch (error) {
+    $('#process-name-error').textContent = error.message;
+    $('#process-name-error').classList.remove('hidden');
+  }
+});
+$('#process-name-cancel').addEventListener('click', () => closeProcessNameDialog());
+$('#process-name-modal').addEventListener('click', (event) => { if (event.target === $('#process-name-modal')) closeProcessNameDialog(); });
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !$('#process-name-modal').classList.contains('hidden')) closeProcessNameDialog(); });
+
+$('#new-cmmn').addEventListener('click', async () => {
+  try {
+    const packageName = await requestCmmnPackageName();
+    if (!packageName) return;
+    const result = await api('/api/compositions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'cmmn', package_name: packageName }) });
+    await openDiagram(result.diagram);
+  } catch (error) { showToast(error.message); }
+});
+
+$('#return-to-anchor').addEventListener('click', () => {
+  const origin = activeTab?.originPath ? tabs.get(activeTab.originPath) : null;
+  if (origin) activateTab(origin);
+});
+
 function syncFullscreenControl() {
   const fullscreen = Boolean(document.fullscreenElement);
   const button = $('#fit-view');
@@ -664,7 +862,8 @@ async function initialize() {
     document.title = projectDocumentTitle(metadata?.name);
     assistantProvider = metadata?.assistant_provider || 'fake';
   } catch {}
-  await openDiagram('main.bpmn');
+  projectAnchorPath = selectProjectAnchor(await api('/api/diagrams'));
+  await openDiagram(projectAnchorPath);
 }
 
 syncMarkdownControl();

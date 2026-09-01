@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<cmmn:definitions xmlns:cmmn="http://www.omg.org/spec/CMMN/20151109/MODEL" xmlns:cmmndi="http://www.omg.org/spec/CMMN/20151109/CMMNDI" xmlns:dc="http://www.omg.org/spec/CMMN/20151109/DC" xmlns:di="http://www.omg.org/spec/CMMN/20151109/DI" xmlns:ssw="https://software-schematic.dev/schema/cmmn" id="Definitions_Cybling" targetNamespace="https://software-schematic.dev/cmmn/cybling" exporter="Software Schematic" ssw:packageName="cybling">
+  <cmmn:case id="Case_Cybling" name="Cybling Business Needs">
+    <cmmn:casePlanModel id="CasePlanModel_Cybling" name="Cybling" autoComplete="false">
+      <cmmn:planItem id="PlanItem_Sdk" name="SDK Capability" definitionRef="Stage_Sdk" ssw:architecturalName="cybling#sdkCapability" />
+      <cmmn:planItem id="PlanItem_Birth" name="Birth Design" definitionRef="ProcessTask_Birth" ssw:architecturalName="cybling.sdk.Birth">
+        <cmmn:entryCriterion id="EntryCriterion_Birth" name="SDK available" sentryRef="Sentry_SdkAvailable" ssw:architecturalName="cybling#sdkAvailable" />
+      </cmmn:planItem>
+      <cmmn:planItem id="PlanItem_CaseReview" name="Review Need" definitionRef="CaseTask_Review" ssw:architecturalName="cybling#reviewNeed" />
+      <cmmn:sentry id="Sentry_SdkAvailable" name="SDK available" ssw:architecturalName="cybling#sdkAvailableSentry">
+        <cmmn:planItemOnPart id="OnPart_SdkComplete" sourceRef="PlanItem_Sdk">
+          <cmmn:standardEvent>complete</cmmn:standardEvent>
+        </cmmn:planItemOnPart>
+      </cmmn:sentry>
+      <cmmn:stage id="Stage_Sdk" name="SDK" autoComplete="false" ssw:architecturalName="cybling#sdk" />
+      <cmmn:processTask id="ProcessTask_Birth" name="Birth" processRef="cybling.sdk.Birth" ssw:architecturalName="cybling.sdk.Birth" />
+      <cmmn:caseTask id="CaseTask_Review" name="Review Need" ssw:architecturalName="cybling#reviewNeedDefinition" />
+    </cmmn:casePlanModel>
+  </cmmn:case>
+  <cmmndi:CMMNDI>
+    <cmmndi:CMMNDiagram id="CMMNDiagram_Cybling">
+      <cmmndi:Size width="1000" height="700" />
+      <cmmndi:CMMNShape id="CMMNShape_CasePlanModel" cmmnElementRef="CasePlanModel_Cybling"><dc:Bounds x="60" y="50" width="860" height="560" /><cmmndi:CMMNLabel /></cmmndi:CMMNShape>
+      <cmmndi:CMMNShape id="CMMNShape_Sdk" cmmnElementRef="PlanItem_Sdk"><dc:Bounds x="130" y="150" width="240" height="250" /><cmmndi:CMMNLabel /></cmmndi:CMMNShape>
+      <cmmndi:CMMNShape id="CMMNShape_Birth" cmmnElementRef="PlanItem_Birth"><dc:Bounds x="480" y="180" width="120" height="80" /><cmmndi:CMMNLabel /></cmmndi:CMMNShape>
+      <cmmndi:CMMNShape id="CMMNShape_EntryCriterion" cmmnElementRef="EntryCriterion_Birth"><dc:Bounds x="472" y="205" width="18" height="28" /><cmmndi:CMMNLabel /></cmmndi:CMMNShape>
+      <cmmndi:CMMNShape id="CMMNShape_CaseReview" cmmnElementRef="PlanItem_CaseReview"><dc:Bounds x="670" y="180" width="120" height="80" /><cmmndi:CMMNLabel /></cmmndi:CMMNShape>
+    </cmmndi:CMMNDiagram>
+  </cmmndi:CMMNDI>
+</cmmn:definitions>

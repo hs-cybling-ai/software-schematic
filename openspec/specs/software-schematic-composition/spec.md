@@ -2,56 +2,53 @@
 
 ## Purpose
 
-Define deterministic folder conventions and navigation for composed, reusable BPMN process models.
+Define deterministic folder conventions, documentation ownership, and navigation for CMMN business anchors and reusable BPMN process models.
 
 ## Requirements
 
 ### Requirement: Folder-based base diagrams
-The system SHALL represent each composition folder with `main.bpmn` as its base diagram and `main.md` as its diagram documentation, with `schematics/main.bpmn` and `schematics/main.md` as the root composition.
+The system SHALL represent BPMN process compositions with `main.bpmn`, CMMN package anchors with `main.cmmn`, and either diagram type with sibling `main.md` documentation. A new project SHALL use `schematics/main.cmmn` as its root anchor; `schematics/main.bpmn` SHALL remain a legacy fallback only when no root CMMN exists.
 
 #### Scenario: Root composition opens
 - **WHEN** the initialized application starts
-- **THEN** it opens `schematics/main.bpmn` and associates `schematics/main.md` with the diagram
+- **THEN** it opens the sole root anchor and associates `schematics/main.md` with that diagram
 
-### Requirement: Element documentation convention
-The system SHALL store documentation for a BPMN element at `docs/<element-id>.md` within the composition folder containing that element's base diagram.
+### Requirement: Name-based composition folders
+The system SHALL map process Name `package.Process` to `schematics/package/Process/`, containing `main.bpmn` and `main.md`. Users and providers SHALL supply the Name and SHALL NOT supply a separate folder path.
 
-#### Scenario: Document an element for the first time
-- **WHEN** the user edits documentation for an element that has no Markdown file
-- **THEN** the server creates the composition folder's `docs/` directory and writes `<element-id>.md`
+#### Scenario: Named process opens
+- **WHEN** an element has Name `sales.checkout.PlaceOrder`
+- **THEN** SSW opens or creates `schematics/sales/checkout/PlaceOrder/main.bpmn`
 
-### Requirement: External subprocess reference
-The editor SHALL use BPMN call activities as external subprocesses and SHALL store a normalized `schematics/`-relative composition folder in the call activity's standard `calledElement` value.
+### Requirement: ID-bound element documentation
+The system SHALL store node and edge Documentation at `docs/<element-id>.md` within the owning composition. It SHALL use `main.md` for process Documentation and SHALL NOT expose a Documentation-path metadata field.
 
-#### Scenario: Configure an external subprocess
-- **WHEN** the user assigns a valid composition path to a call activity
-- **THEN** the BPMN model stores that normalized relative path as `calledElement`
+#### Scenario: Node documentation is created
+- **WHEN** node `Activity_42` has Name `sales.checkout.PlaceOrder#validateCart`
+- **THEN** its Documentation is stored as `schematics/sales/checkout/PlaceOrder/docs/Activity_42.md`
 
-### Requirement: External subprocess navigation and creation
-The application SHALL resolve an external subprocess to `<calledElement>/main.bpmn` when its call activity is double-clicked, SHALL create the composition folder with starter `main.bpmn` and `main.md` when absent, and SHALL focus the resolved diagram's canonical tab.
+#### Scenario: Edge documentation is created
+- **WHEN** edge `Flow_7` has Name `sales.checkout.PlaceOrder#paymentApproved`
+- **THEN** its Documentation is stored as `schematics/sales/checkout/PlaceOrder/docs/Flow_7.md`
 
-#### Scenario: Double-click an existing external subprocess
-- **WHEN** the user double-clicks a call activity whose composition folder exists
-- **THEN** the application opens or focuses that folder's `main.bpmn` tab
+#### Scenario: Two call sites share one implementation
+- **WHEN** two call activities use the same process Name from different owning diagrams
+- **THEN** each caller keeps separate ID-bound Documentation in its owning composition and both open the same subprocess `main.md`
 
-#### Scenario: Double-click a new external subprocess
-- **WHEN** the user double-clicks a call activity whose valid composition folder does not exist
-- **THEN** the server creates the folder, starter base diagram, and diagram Markdown before the application opens and focuses its tab
+### Requirement: Mixed diagram compositions
+The system SHALL allow CMMN business-anchor diagrams and BPMN design compositions to coexist beneath `schematics/` and SHALL distinguish them by their complete canonical path and extension. It SHALL allow a CMMN anchor to link to BPMN processes in descendant package folders without requiring CMMN at each intermediate level. Existing BPMN process folder and `main.bpmn` behavior SHALL remain unchanged.
 
-### Requirement: Reusable process references
-The application SHALL allow multiple call activities in any composition folder to reference the same normalized external subprocess folder.
+#### Scenario: Package contains CMMN and BPMN compositions
+- **WHEN** package `cybling.sdk` has a package diagram and process `Birth`
+- **THEN** `cybling/sdk/main.cmmn` and `cybling/sdk/Birth/main.bpmn` open as separate compositions with independent Markdown and save state
 
-#### Scenario: Two flows reuse a process
-- **WHEN** two call activities have the same `calledElement` composition path
-- **THEN** both resolve to the same canonical `main.bpmn` tab and documentation files
+### Requirement: CMMN ID-bound documentation
+The system SHALL store CMMN diagram Documentation in sibling `main.md` and Documentation for each supported CMMN node or connection at `docs/<element-id>.md` within its owning package folder. Changing a CMMN Name SHALL NOT rename the ID-bound Documentation file.
 
-### Requirement: Pool and lane composition folders
-The system SHALL map a pool to `<parent>/<pool-id>/` and a lane within that pool to `<parent>/<pool-id>/<lane-id>/`, and SHALL create each mapped folder with `main.bpmn` and `main.md` when the user first opens it as a composition.
+#### Scenario: CMMN element Documentation is created
+- **WHEN** element `PlanItem_42` in `cybling/sdk/main.cmmn` becomes the Documentation target
+- **THEN** its Documentation is stored at `schematics/cybling/sdk/docs/PlanItem_42.md`
 
-#### Scenario: Open a pool composition
-- **WHEN** the user opens a pool as a composition and its mapped folder is absent
-- **THEN** the system creates `<parent>/<pool-id>/main.bpmn` and `<parent>/<pool-id>/main.md` and focuses the base diagram
-
-#### Scenario: Open a lane composition
-- **WHEN** the user opens a lane as a composition and its mapped folder is absent
-- **THEN** the system creates `<parent>/<pool-id>/<lane-id>/main.bpmn` and `<parent>/<pool-id>/<lane-id>/main.md` and focuses the base diagram
+#### Scenario: CMMN connection ID changes
+- **WHEN** a documented CMMN connection ID changes from `Connection_1` to an unused `Connection_2`
+- **THEN** its Documentation is safely renamed from `docs/Connection_1.md` to `docs/Connection_2.md`

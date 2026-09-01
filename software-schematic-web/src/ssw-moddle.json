@@ -1,0 +1,22 @@
+{
+  "name": "Software Schematic",
+  "uri": "https://software-schematic.dev/schema/bpmn",
+  "prefix": "ssw",
+  "xml": { "tagAlias": "lowerCase" },
+  "types": [
+    {
+      "name": "NamedBaseElement",
+      "extends": ["bpmn:BaseElement"],
+      "properties": [
+        { "name": "architecturalName", "isAttr": true, "type": "String" }
+      ]
+    },
+    {
+      "name": "NamedDefinitions",
+      "extends": ["bpmn:Definitions"],
+      "properties": [
+        { "name": "processName", "isAttr": true, "type": "String" }
+      ]
+    }
+  ]
+}

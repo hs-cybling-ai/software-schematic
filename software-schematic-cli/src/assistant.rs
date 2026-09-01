@@ -1,8 +1,11 @@
-use crate::{Error, Result};
+use crate::{
+    Error, Result, validate_element_name, validate_member_name, validate_package_name,
+    validate_qualified_process_name,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env,
     io::Write,
     path::PathBuf,
@@ -10,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-pub const SCHEMA_VERSION: &str = "1.0";
+pub const SCHEMA_VERSION: &str = "2.0";
 pub const MAX_OPERATIONS: usize = 64;
 pub const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 
@@ -88,18 +91,19 @@ impl AssistantProvider for FakeProvider {
             && primary.is_some()
         {
             let node_id = primary.unwrap();
-            let child = "assistant-subprocess";
+            let child = "assistant.AssistantSubprocess";
+            let child_diagram = "assistant/AssistantSubprocess/main.bpmn";
             vec![
                 json!({"type":"replace_node_type","diagramPath":diagram,"nodeId":node_id,"bpmnType":"bpmn:CallActivity"}),
-                json!({"type":"set_composition_link","diagramPath":diagram,"nodeId":node_id,"path":child}),
-                json!({"type":"create_composition","path":child}),
-                json!({"type":"add_flow_node","diagramPath":format!("{child}/main.bpmn"),"nodeId":"AssistantStep_1","bpmnType":"bpmn:Task","label":"First step","x":180,"y":330}),
-                json!({"type":"add_flow_node","diagramPath":format!("{child}/main.bpmn"),"nodeId":"AssistantStep_2","bpmnType":"bpmn:Task","label":"Second step","x":350,"y":330}),
-                json!({"type":"add_flow_node","diagramPath":format!("{child}/main.bpmn"),"nodeId":"AssistantStep_3","bpmnType":"bpmn:Task","label":"Third step","x":520,"y":330}),
-                json!({"type":"add_flow_node","diagramPath":format!("{child}/main.bpmn"),"nodeId":"AssistantStep_4","bpmnType":"bpmn:Task","label":"Fourth step","x":690,"y":330}),
-                json!({"type":"connect_sequence_flow","diagramPath":format!("{child}/main.bpmn"),"flowId":"AssistantFlow_1","sourceId":"AssistantStep_1","targetId":"AssistantStep_2"}),
-                json!({"type":"connect_sequence_flow","diagramPath":format!("{child}/main.bpmn"),"flowId":"AssistantFlow_2","sourceId":"AssistantStep_2","targetId":"AssistantStep_3"}),
-                json!({"type":"connect_sequence_flow","diagramPath":format!("{child}/main.bpmn"),"flowId":"AssistantFlow_3","sourceId":"AssistantStep_3","targetId":"AssistantStep_4"}),
+                json!({"type":"set_process_reference","diagramPath":diagram,"nodeId":node_id,"qualifiedName":child}),
+                json!({"type":"create_process","qualifiedName":child}),
+                json!({"type":"add_flow_node","diagramPath":child_diagram,"nodeId":"AssistantStep_1","bpmnType":"bpmn:Task","name":"assistant.AssistantSubprocess#firstStep","label":"First step","x":180,"y":330}),
+                json!({"type":"add_flow_node","diagramPath":child_diagram,"nodeId":"AssistantStep_2","bpmnType":"bpmn:Task","name":"assistant.AssistantSubprocess#secondStep","label":"Second step","x":350,"y":330}),
+                json!({"type":"add_flow_node","diagramPath":child_diagram,"nodeId":"AssistantStep_3","bpmnType":"bpmn:Task","name":"assistant.AssistantSubprocess#thirdStep","label":"Third step","x":520,"y":330}),
+                json!({"type":"add_flow_node","diagramPath":child_diagram,"nodeId":"AssistantStep_4","bpmnType":"bpmn:Task","name":"assistant.AssistantSubprocess#fourthStep","label":"Fourth step","x":690,"y":330}),
+                json!({"type":"connect_sequence_flow","diagramPath":child_diagram,"flowId":"AssistantFlow_1","sourceId":"AssistantStep_1","targetId":"AssistantStep_2"}),
+                json!({"type":"connect_sequence_flow","diagramPath":child_diagram,"flowId":"AssistantFlow_2","sourceId":"AssistantStep_2","targetId":"AssistantStep_3"}),
+                json!({"type":"connect_sequence_flow","diagramPath":child_diagram,"flowId":"AssistantFlow_3","sourceId":"AssistantStep_3","targetId":"AssistantStep_4"}),
                 json!({"type":"replace_node_markdown","diagramPath":diagram,"nodeId":node_id,"markdown":"# Assistant subprocess\n\nThis activity delegates to a documented four-step composition."}),
             ]
         } else {
@@ -159,7 +163,7 @@ impl LocalCliProvider {
     fn run(&self, request: &AssistantRequest) -> Result<AssistantResult> {
         let schema = operation_plan_schema();
         let prompt = format!(
-            "Return only a Software Schematic operation plan matching the supplied JSON schema. Do not inspect files, run tools, or mutate anything. Preserve requestId={} and sourceRevision={}. Every path must be non-empty and relative to the schematics directory, never absolute and never prefixed with schematics/. For create_composition, open_composition, and set_composition_link, use only a composition folder such as checkout. For diagramPath, use a BPMN file such as checkout/main.bpmn. When a requested child flow needs a new composition and none is named, choose a short folder slug from the selected node label. Interpret system task as bpmn:ServiceTask. Emit each intended operation only once. User request: {}\nContext: {}",
+            "Return only a Software Schematic operation plan matching the supplied JSON schema. Do not inspect files, run tools, or mutate anything. Preserve requestId={} and sourceRevision={}. Preserve every existing ID, Type, Label, Name, Implementation Status, and Documentation unless an explicit operation changes it. Never emit a composition folder path: use a complete Name. BPMN Process Names use package.Process and BPMN members use package.Process#member. CMMN business-need members use package#member, while a CMMN ProcessTask link uses package.Process. A process rename must use rename_process. For diagramPath, use the path already present in context. Interpret system task as bpmn:ServiceTask. Emit each intended operation only once. User request: {}\nContext: {}",
             request.request_id,
             request.snapshot["sourceRevision"]
                 .as_str()
@@ -408,24 +412,15 @@ pub async fn generate(
 
 fn canonicalize_plan_paths(plan: &mut AssistantPlan) -> Result<()> {
     for operation in &mut plan.operations {
-        let operation_type = operation["type"].as_str().unwrap_or_default().to_owned();
         for field in ["path", "diagramPath"] {
             let Some(raw) = operation[field].as_str() else {
                 continue;
             };
             let trimmed = raw.trim();
-            let mut normalized = trimmed
+            let normalized = trimmed
                 .strip_prefix("/schematics/")
                 .or_else(|| trimmed.strip_prefix("schematics/"))
                 .unwrap_or(trimmed);
-            if field == "path"
-                && matches!(
-                    operation_type.as_str(),
-                    "create_composition" | "open_composition" | "set_composition_link"
-                )
-            {
-                normalized = normalized.strip_suffix("/main.bpmn").unwrap_or(normalized);
-            }
             confined_path(normalized)?;
             operation[field] = json!(normalized);
         }
@@ -471,26 +466,52 @@ pub fn validate_plan(plan: &AssistantPlan, request: &AssistantRequest) -> Result
     let allowed: HashSet<&str> = [
         "replace_node_type",
         "update_node_label",
-        "set_composition_link",
-        "create_composition",
-        "open_composition",
+        "update_node_name",
+        "set_process_reference",
+        "create_process",
+        "open_process",
+        "rename_process",
         "add_flow_node",
         "connect_sequence_flow",
+        "add_plan_item",
+        "connect_cmmn",
         "replace_diagram_markdown",
         "replace_node_markdown",
     ]
     .into_iter()
     .collect();
-    let locked: HashSet<&str> = request
+    let nodes = request
         .snapshot
         .pointer("/graph/nodes")
-        .and_then(Value::as_array)
+        .and_then(Value::as_array);
+    let flows = request
+        .snapshot
+        .pointer("/graph/flows")
+        .and_then(Value::as_array);
+    let elements: Vec<&Value> = nodes
         .into_iter()
         .flatten()
-        .filter(|node| node["status"] == "locked")
-        .filter_map(|node| node["id"].as_str())
+        .chain(flows.into_iter().flatten())
         .collect();
-    let mut ids = HashSet::new();
+    let locked: HashSet<&str> = elements
+        .iter()
+        .filter(|element| element["status"] == "locked")
+        .filter_map(|element| element["id"].as_str())
+        .collect();
+    let mut ids: HashSet<&str> = elements
+        .iter()
+        .filter_map(|element| element["id"].as_str())
+        .collect();
+    let mut node_types: HashMap<&str, &str> = elements
+        .iter()
+        .filter_map(|element| {
+            Some((
+                element["id"].as_str()?,
+                element["type"].as_str().unwrap_or_default(),
+            ))
+        })
+        .collect();
+    let mut process_names = std::collections::HashMap::new();
     for operation in &plan.operations {
         let kind = operation["type"]
             .as_str()
@@ -500,10 +521,54 @@ pub fn validate_plan(plan: &AssistantPlan, request: &AssistantRequest) -> Result
                 "unsupported assistant operation: {kind}"
             )));
         }
+        if operation.get("xml").is_some() || operation.get("rawXml").is_some() {
+            return Err(Error::Message(
+                "assistant providers cannot supply raw diagram XML".into(),
+            ));
+        }
+        if operation.get("path").is_some() {
+            return Err(Error::Message(
+                "assistant providers cannot supply composition paths; use a qualified process Name"
+                    .into(),
+            ));
+        }
         for field in ["path", "diagramPath"] {
             if let Some(path) = operation[field].as_str() {
                 confined_path(path)?;
             }
+        }
+        for field in ["qualifiedName", "oldQualifiedName", "newQualifiedName"] {
+            if let Some(name) = operation[field].as_str() {
+                validate_qualified_process_name(name)?;
+                if field != "oldQualifiedName" {
+                    let key = name.to_ascii_lowercase();
+                    if process_names
+                        .insert(key, name)
+                        .is_some_and(|prior| prior != name)
+                    {
+                        return Err(Error::Message(format!(
+                            "case-insensitive qualified Name collision involving {name}"
+                        )));
+                    }
+                }
+            }
+        }
+        if kind == "update_node_name" {
+            let name = operation["name"].as_str().unwrap_or_default();
+            if request.snapshot["diagramKind"] == "cmmn" {
+                let node_id = operation["nodeId"].as_str().unwrap_or_default();
+                if node_types.get(node_id) == Some(&"cmmn:ProcessTask") {
+                    validate_qualified_process_name(name)?;
+                } else {
+                    validate_cmmn_member_name(name)?;
+                }
+            } else {
+                validate_element_name(name)?;
+            }
+        }
+        if kind == "add_flow_node" && operation["name"].is_string() {
+            let name = operation["name"].as_str().unwrap();
+            validate_element_name(name)?;
         }
         if let Some(id) = operation["nodeId"].as_str() {
             valid_id(id)?;
@@ -512,8 +577,12 @@ pub fn validate_plan(plan: &AssistantPlan, request: &AssistantRequest) -> Result
                     "locked node cannot be changed: {id}"
                 )));
             }
-            if kind == "add_flow_node" && !ids.insert(id) {
-                return Err(Error::Message(format!("duplicate created ID: {id}")));
+            if matches!(kind, "add_flow_node" | "add_plan_item") {
+                if !ids.insert(id) {
+                    return Err(Error::Message(format!("duplicate created ID: {id}")));
+                }
+            } else if !ids.contains(id) {
+                return Err(Error::Message(format!("unknown node: {id}")));
             }
         }
         if kind == "connect_sequence_flow" {
@@ -525,8 +594,77 @@ pub fn validate_plan(plan: &AssistantPlan, request: &AssistantRequest) -> Result
                 return Err(Error::Message(format!("duplicate created ID: {id}")));
             }
         }
+        if kind == "add_plan_item" {
+            if request.snapshot["diagramKind"] != "cmmn" {
+                return Err(Error::Message(
+                    "CMMN plan items require a CMMN diagram".into(),
+                ));
+            }
+            let cmmn_type = operation["cmmnType"].as_str().unwrap_or_default();
+            if !matches!(
+                cmmn_type,
+                "cmmn:Task"
+                    | "cmmn:HumanTask"
+                    | "cmmn:ProcessTask"
+                    | "cmmn:CaseTask"
+                    | "cmmn:Stage"
+                    | "cmmn:Milestone"
+                    | "cmmn:EventListener"
+            ) {
+                return Err(Error::Message(format!(
+                    "unsupported CMMN type: {cmmn_type}"
+                )));
+            }
+            if let Some(name) = operation["name"].as_str() {
+                if cmmn_type == "cmmn:ProcessTask" {
+                    validate_qualified_process_name(name)?;
+                } else {
+                    validate_cmmn_member_name(name)?;
+                }
+            }
+            node_types.insert(operation["nodeId"].as_str().unwrap_or_default(), cmmn_type);
+        }
+        if kind == "connect_cmmn" {
+            if request.snapshot["diagramKind"] != "cmmn" {
+                return Err(Error::Message(
+                    "CMMN connections require a CMMN diagram".into(),
+                ));
+            }
+            let id = operation["connectionId"]
+                .as_str()
+                .ok_or_else(|| Error::Message("CMMN connection has no ID".into()))?;
+            valid_id(id)?;
+            if !ids.insert(id) {
+                return Err(Error::Message(format!("duplicate created ID: {id}")));
+            }
+            for field in ["sourceId", "targetId"] {
+                let element_id = operation[field].as_str().unwrap_or_default();
+                if !ids.contains(element_id) {
+                    return Err(Error::Message(format!(
+                        "CMMN connection references unknown node: {element_id}"
+                    )));
+                }
+            }
+        }
     }
     Ok(())
+}
+
+fn validate_cmmn_member_name(name: &str) -> Result<()> {
+    if let Some((package, member)) = name.split_once('#') {
+        validate_package_name(package)?;
+        validate_member_name(member)?;
+        if member.contains('#') {
+            return Err(Error::Message(
+                "CMMN Name may contain only one # member separator".into(),
+            ));
+        }
+        Ok(())
+    } else {
+        Err(Error::Message(
+            "CMMN node or connection Names require #memberName".into(),
+        ))
+    }
 }
 
 fn valid_id(id: &str) -> Result<()> {
@@ -566,13 +704,8 @@ pub fn operation_plan_schema() -> Value {
             "properties": properties
         })
     }
-    let assistant_path = json!({
-        "type": "string",
-        "minLength": 1,
-        "pattern": "^[^/\\\\].*$",
-        "description": "A non-empty path relative to the schematics directory, without a schematics/ prefix."
-    });
-    let diagram_path = assistant_path.clone();
+    let diagram_path = json!({"type":"string","minLength":1,"pattern":"^[^/\\\\].*$"});
+    let qualified_name = json!({"type":"string","pattern":"^[a-z][A-Za-z0-9]*(\\.[a-z][A-Za-z0-9]*)*\\.[A-Z][A-Za-z0-9]*$"});
     let node_id = json!({"type": "string"});
     json!({
         "type": "object", "additionalProperties": false,
@@ -585,11 +718,15 @@ pub fn operation_plan_schema() -> Value {
             "operations": {"type": "array", "maxItems": MAX_OPERATIONS, "items": {"anyOf": [
                 operation(&["type", "diagramPath", "nodeId", "bpmnType"], json!({"type":{"type":"string","const":"replace_node_type"},"diagramPath":diagram_path,"nodeId":node_id,"bpmnType":{"type":"string"}})),
                 operation(&["type", "diagramPath", "nodeId", "label"], json!({"type":{"type":"string","const":"update_node_label"},"diagramPath":diagram_path,"nodeId":node_id,"label":{"type":"string"}})),
-                operation(&["type", "diagramPath", "nodeId", "path"], json!({"type":{"type":"string","const":"set_composition_link"},"diagramPath":diagram_path,"nodeId":node_id,"path":assistant_path})),
-                operation(&["type", "path"], json!({"type":{"type":"string","const":"create_composition"},"path":assistant_path})),
-                operation(&["type", "path"], json!({"type":{"type":"string","const":"open_composition"},"path":assistant_path})),
-                operation(&["type", "diagramPath", "nodeId", "bpmnType", "label", "x", "y"], json!({"type":{"type":"string","const":"add_flow_node"},"diagramPath":diagram_path,"nodeId":node_id,"bpmnType":{"type":"string"},"label":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"}})),
+                operation(&["type", "diagramPath", "nodeId", "name"], json!({"type":{"type":"string","const":"update_node_name"},"diagramPath":diagram_path,"nodeId":node_id,"name":{"type":"string"}})),
+                operation(&["type", "diagramPath", "nodeId", "qualifiedName"], json!({"type":{"type":"string","const":"set_process_reference"},"diagramPath":diagram_path,"nodeId":node_id,"qualifiedName":qualified_name})),
+                operation(&["type", "qualifiedName"], json!({"type":{"type":"string","const":"create_process"},"qualifiedName":qualified_name})),
+                operation(&["type", "qualifiedName"], json!({"type":{"type":"string","const":"open_process"},"qualifiedName":qualified_name})),
+                operation(&["type", "oldQualifiedName", "newQualifiedName"], json!({"type":{"type":"string","const":"rename_process"},"oldQualifiedName":qualified_name,"newQualifiedName":qualified_name})),
+                operation(&["type", "diagramPath", "nodeId", "bpmnType", "name", "label", "x", "y"], json!({"type":{"type":"string","const":"add_flow_node"},"diagramPath":diagram_path,"nodeId":node_id,"bpmnType":{"type":"string"},"name":{"type":"string"},"label":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"}})),
                 operation(&["type", "diagramPath", "flowId", "sourceId", "targetId"], json!({"type":{"type":"string","const":"connect_sequence_flow"},"diagramPath":diagram_path,"flowId":{"type":"string"},"sourceId":{"type":"string"},"targetId":{"type":"string"}})),
+                operation(&["type", "diagramPath", "nodeId", "cmmnType", "name", "label", "x", "y"], json!({"type":{"type":"string","const":"add_plan_item"},"diagramPath":diagram_path,"nodeId":node_id,"cmmnType":{"type":"string","enum":["cmmn:Task","cmmn:HumanTask","cmmn:ProcessTask","cmmn:CaseTask","cmmn:Stage","cmmn:Milestone","cmmn:EventListener"]},"name":{"type":"string"},"label":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"}})),
+                operation(&["type", "diagramPath", "connectionId", "sourceId", "targetId"], json!({"type":{"type":"string","const":"connect_cmmn"},"diagramPath":diagram_path,"connectionId":{"type":"string"},"sourceId":{"type":"string"},"targetId":{"type":"string"}})),
                 operation(&["type", "diagramPath", "markdown"], json!({"type":{"type":"string","const":"replace_diagram_markdown"},"diagramPath":diagram_path,"markdown":{"type":"string"}})),
                 operation(&["type", "diagramPath", "nodeId", "markdown"], json!({"type":{"type":"string","const":"replace_node_markdown"},"diagramPath":diagram_path,"nodeId":node_id,"markdown":{"type":"string"}}))
             ]}}
@@ -604,7 +741,7 @@ mod tests {
         AssistantRequest {
             request_id: "request-1".into(),
             prompt: "Improve it".into(),
-            snapshot: json!({"version":"1.0","diagramPath":"main.bpmn","sourceRevision":"abc","primaryNodeId":"Task_1","graph":{"nodes":[{"id":"Task_1","label":"Work","status":"open"}]}}),
+            snapshot: json!({"version":"2.0","diagramPath":"main.bpmn","sourceRevision":"abc","primaryNodeId":"Task_1","graph":{"nodes":[{"id":"Task_1","name":"work","label":"Work","status":"open"}]}}),
         }
     }
     #[tokio::test]
@@ -621,7 +758,7 @@ mod tests {
         let mut value = request();
         value.snapshot["graph"]["nodes"][0]["status"] = json!("locked");
         let plan = AssistantPlan {
-            version: "1.0".into(),
+            version: SCHEMA_VERSION.into(),
             request_id: "request-1".into(),
             source_revision: "abc".into(),
             summary: "x".into(),
@@ -640,6 +777,9 @@ mod tests {
         let mut escaped = plan.clone();
         escaped.operations[0]["diagramPath"] = json!("../outside.bpmn");
         assert!(validate_plan(&escaped, &request()).is_err());
+        let mut raw_xml = plan.clone();
+        raw_xml.operations[0]["rawXml"] = json!("<bpmn />");
+        assert!(validate_plan(&raw_xml, &request()).is_err());
         let mut unsupported = plan;
         unsupported.operations[0]["type"] = json!("shell");
         assert!(validate_plan(&unsupported, &request()).is_err());
@@ -653,7 +793,7 @@ mod tests {
             .unwrap()
             .as_array()
             .unwrap();
-        assert_eq!(variants.len(), 9);
+        assert_eq!(variants.len(), 13);
         assert!(
             variants
                 .iter()
@@ -670,9 +810,43 @@ mod tests {
     }
 
     #[test]
+    fn cmmn_operations_validate_business_members_process_links_and_connections() {
+        let request = AssistantRequest {
+            request_id: "request-cmmn".into(),
+            prompt: "Trace the need to its design".into(),
+            snapshot: json!({
+                "version":"2.0", "diagramKind":"cmmn", "diagramPath":"cybling/main.cmmn", "sourceRevision":"cmmn-rev",
+                "graph":{"nodes":[{"id":"PlanItem_Need","type":"cmmn:HumanTask","name":"cybling#captureNeed","status":"open"}],"flows":[]}
+            }),
+        };
+        let plan = AssistantPlan {
+            version: SCHEMA_VERSION.into(),
+            request_id: "request-cmmn".into(),
+            source_revision: "cmmn-rev".into(),
+            summary: "Trace need".into(),
+            assumptions: vec![],
+            warnings: vec![],
+            operations: vec![
+                json!({"type":"add_plan_item","diagramPath":"cybling/main.cmmn","nodeId":"PlanItem_Birth","cmmnType":"cmmn:ProcessTask","name":"cybling.sdk.Birth","label":"Birth design"}),
+                json!({"type":"connect_cmmn","diagramPath":"cybling/main.cmmn","connectionId":"Association_Birth","sourceId":"PlanItem_Need","targetId":"PlanItem_Birth"}),
+                json!({"type":"update_node_name","diagramPath":"cybling/main.cmmn","nodeId":"Association_Birth","name":"cybling#birthTrace"}),
+                json!({"type":"set_process_reference","diagramPath":"cybling/main.cmmn","nodeId":"PlanItem_Birth","qualifiedName":"cybling.sdk.Birth"}),
+            ],
+        };
+        validate_plan(&plan, &request).unwrap();
+
+        let mut invalid_member = plan.clone();
+        invalid_member.operations[0]["cmmnType"] = json!("cmmn:Stage");
+        assert!(validate_plan(&invalid_member, &request).is_err());
+        let mut missing_target = plan;
+        missing_target.operations[1]["targetId"] = json!("Missing");
+        assert!(validate_plan(&missing_target, &request).is_err());
+    }
+
+    #[test]
     fn provider_paths_are_canonicalized_before_validation() {
         let mut plan = AssistantPlan {
-            version: "1.0".into(),
+            version: SCHEMA_VERSION.into(),
             request_id: "request-1".into(),
             source_revision: "abc".into(),
             summary: "x".into(),
@@ -686,7 +860,7 @@ mod tests {
         assert_eq!(plan.operations[0]["path"], "cybling-setup");
         plan.operations[0]["path"] = json!("cybling-setup/main.bpmn");
         canonicalize_plan_paths(&mut plan).unwrap();
-        assert_eq!(plan.operations[0]["path"], "cybling-setup");
+        assert_eq!(plan.operations[0]["path"], "cybling-setup/main.bpmn");
         plan.operations[0]["path"] = json!("");
         assert!(canonicalize_plan_paths(&mut plan).is_err());
     }

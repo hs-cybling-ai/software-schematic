@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<cmmn:definitions xmlns:cmmn="http://www.omg.org/spec/CMMN/20151109/MODEL" id="Definitions_Invalid">
+  <cmmn:case id="Case_Invalid">
+    <cmmn:casePlanModel id="CasePlanModel_Invalid">
+      <cmmn:planItem id="PlanItem_MissingDefinition" definitionRef="DoesNotExist" />
+    </cmmn:casePlanModel>
+  </cmmn:case>
+</cmmn:definitions>

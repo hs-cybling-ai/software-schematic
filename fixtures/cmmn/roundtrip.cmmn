@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<cmmn:definitions xmlns:cmmn="http://www.omg.org/spec/CMMN/20151109/MODEL" xmlns:cmmndi="http://www.omg.org/spec/CMMN/20151109/CMMNDI" xmlns:dc="http://www.omg.org/spec/CMMN/20151109/DC" xmlns:di="http://www.omg.org/spec/CMMN/20151109/DI" xmlns:ssw="https://software-schematic.dev/schema/cmmn" id="Definitions_RoundTrip" targetNamespace="https://software-schematic.dev/cmmn/roundtrip" exporter="Software Schematic" ssw:packageName="cybling.sdk">
+  <cmmn:process id="Process_Birth" name="Birth" implementationType="http://www.omg.org/spec/BPMN/20100524/MODEL" externalRef="cybling.sdk.Birth" ssw:architecturalName="cybling.sdk.Birth" />
+  <cmmn:case id="Case_RoundTrip" name="SDK Need" ssw:architecturalName="cybling.sdk#sdkNeed">
+    <cmmn:casePlanModel id="CasePlanModel_RoundTrip" name="SDK Need" autoComplete="false">
+      <cmmn:planItem id="PlanItem_Birth" name="Birth" definitionRef="ProcessTask_Birth" ssw:architecturalName="cybling.sdk.Birth" />
+      <cmmn:processTask id="ProcessTask_Birth" name="Birth" processRef="cybling.sdk.Birth" ssw:architecturalName="cybling.sdk.Birth" />
+    </cmmn:casePlanModel>
+  </cmmn:case>
+  <cmmndi:CMMNDI><cmmndi:CMMNDiagram id="CMMNDiagram_RoundTrip"><cmmndi:Size width="700" height="500" /><cmmndi:CMMNShape id="Shape_CasePlanModel" cmmnElementRef="CasePlanModel_RoundTrip"><dc:Bounds x="60" y="50" width="580" height="380" /><cmmndi:CMMNLabel /></cmmndi:CMMNShape><cmmndi:CMMNShape id="Shape_Birth" cmmnElementRef="PlanItem_Birth"><dc:Bounds x="250" y="180" width="120" height="80" /><cmmndi:CMMNLabel /></cmmndi:CMMNShape></cmmndi:CMMNDiagram></cmmndi:CMMNDI>
+</cmmn:definitions>

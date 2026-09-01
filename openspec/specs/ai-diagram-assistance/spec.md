@@ -7,7 +7,7 @@ Provide safe, scoped AI proposals for coordinated Software Schematic diagram and
 ## Requirements
 
 ### Requirement: Scope-aware assistant prompting
-The application SHALL accept a natural-language change request from the assistant dialog and SHALL construct a versioned, size-bounded context snapshot for the invocation scope. Every snapshot SHALL include the active composition path, normalized diagram nodes and flows, BPMN identity and labels, composition references, live node-status hints, active diagram Markdown, and a source revision. A node-scoped snapshot SHALL additionally identify the primary node and include its Markdown; a diagram-scoped snapshot SHALL treat the complete active diagram as modifiable scope without selecting a primary node. The application SHALL flush pending relevant edits before snapshotting and SHALL disclose when optional context was truncated.
+The application SHALL accept a natural-language change request from the assistant dialog and SHALL construct a versioned, size-bounded context snapshot for the invocation scope. Every normalized diagram element in assistant context SHALL include ID, Type, Label, the single complete Name, Implementation Status, and Documentation when included by scope. Context SHALL NOT contain separate local Name, qualified symbol, composition path, or Documentation-path fields. A node-scoped snapshot SHALL additionally identify the primary node and include its Markdown; a diagram-scoped snapshot SHALL treat the complete active diagram as modifiable scope without selecting a primary node. The application SHALL flush pending relevant edits before snapshotting and SHALL disclose when optional context was truncated.
 
 #### Scenario: Node-scoped request is submitted
 - **WHEN** the user submits a prompt from a node magic action
@@ -45,18 +45,26 @@ The Rust server SHALL expose a confined assistant-proposal operation backed by a
 - **THEN** the dialog explains how to configure assistance without exposing or requesting a credential in browser content
 
 ### Requirement: Allowed diagram operation schema
-The initial operation schema SHALL support replacing an eligible node's BPMN type, changing an eligible node label, assigning or preserving an external composition reference, creating or opening a confined composition, adding supported flow nodes, connecting supported nodes with sequence flows, and replacing diagram or node Markdown. Every operation SHALL use stable element identifiers and normalized composition-relative paths and SHALL contain no executable content. The schema SHALL support the coordinated replacement of a task with a subprocess or call activity, creation of its composition, creation of an ordered multi-step flow, and update of related Markdown.
+The initial operation schema SHALL support replacing an eligible node's BPMN type, changing an eligible node label or complete Name, assigning or preserving a named process reference, creating or opening a composition from a complete process Name, adding supported flow nodes, connecting supported nodes with sequence flows, and replacing diagram or node Markdown. Every operation SHALL use stable element IDs and complete process or member Names and SHALL contain no executable content. Providers SHALL NOT supply composition or Documentation paths. Existing ID, Label, and Name values SHALL be preserved unless an explicit operation changes them.
 
 #### Scenario: Task becomes a documented subprocess
 - **WHEN** a valid proposal replaces a task, links it to a new composition, adds four ordered steps and required start/end flow in that composition, and updates parent, diagram, or node Markdown
-- **THEN** the plan expresses every change using only allowed typed operations with stable IDs and confined paths
+- **THEN** the plan expresses every change using only allowed typed operations with stable IDs and complete Names
+
+#### Scenario: Provider creates a reusable process
+- **WHEN** a provider proposes process Name `sales.checkout.PlaceOrder`
+- **THEN** SSW derives the composition folder from that Name
+
+#### Scenario: Provider supplies a path
+- **WHEN** a provider attempts to choose a composition or Documentation path
+- **THEN** validation rejects the proposal
 
 #### Scenario: Unsupported mutation is proposed
 - **WHEN** a plan requests arbitrary BPMN XML replacement, JavaScript execution, a shell command, or an operation outside the registered schema
 - **THEN** validation rejects the complete plan before preview or application
 
 ### Requirement: Independent proposal validation
-The application SHALL treat provider output as untrusted and SHALL validate the complete plan before preview and again before application. Validation SHALL confirm schema and request correlation, current source revision, existing references, unique created IDs, permitted BPMN replacements and connections, confined composition/documentation paths, configured size and operation limits, and node-status constraints. An operation SHALL NOT modify, replace, delete, relabel, or reconfigure a `locked` node. `new` and `modify` SHALL be supplied as positive authoring hints but SHALL NOT bypass validation.
+The application SHALL treat provider output as untrusted and SHALL validate the complete plan before preview and again before application. Validation SHALL confirm schema and request correlation, current source revision, existing references, unique created IDs, permitted BPMN replacements and connections, valid complete Names, configured size and operation limits, and Implementation Status constraints. An operation SHALL NOT modify, replace, delete, relabel, or reconfigure a `locked` element. `new` and `modify` SHALL be supplied as positive authoring hints but SHALL NOT bypass validation.
 
 #### Scenario: Locked node would change
 - **WHEN** any operation would change a node whose live status is `locked`
@@ -129,3 +137,32 @@ The project wrapper SHALL provide `auth login`, `auth status`, and `auth logout`
 #### Scenario: User signs out
 - **WHEN** the user runs `ssw auth logout`
 - **THEN** SSW delegates logout to the selected provider and removes the project provider selection
+
+### Requirement: CMMN assistant context
+For a CMMN diagram- or node-scoped magic request, the application SHALL construct the existing bounded context shape using normalized CMMN elements and SHALL identify the CMMN content as business-need context. Each included element SHALL provide ID, CMMN Type, Label, complete Name, Implementation Status, and Documentation when in scope, and the request SHALL identify the owning package and `.cmmn` diagram without exposing an absolute project path.
+
+#### Scenario: CMMN diagram request is prepared
+- **WHEN** a user submits a prompt from the magic action on `cybling/sdk/main.cmmn`
+- **THEN** the provider receives a bounded normalized CMMN snapshot and package identity rather than raw filesystem authority
+
+### Requirement: Bounded CMMN operations
+The assistant operation schema SHALL support only registered CMMN documentation-tool operations: changing an eligible Label or complete Name, replacing diagram or element Markdown, adding a supported CMMN plan item, connecting supported elements, and assigning or opening a Process Task BPMN-process link. It SHALL reject raw XML replacement, arbitrary paths, project-structure inference, executable content, runtime case behavior, and unsupported CMMN semantics.
+
+#### Scenario: Assistant links a Process Task
+- **WHEN** a valid proposal assigns BPMN process Name `cybling.sdk.Birth` to a CMMN Process Task
+- **THEN** the preview identifies the derived BPMN composition and the provider supplies no filesystem path
+
+#### Scenario: One need anchors a descendant package design
+- **WHEN** a proposal links a Process Task in CMMN package `cybling` to BPMN process `cybling.sdk.Birth`
+- **THEN** validation accepts the complete BPMN Name without requiring `cybling.sdk/main.cmmn`
+
+#### Scenario: Assistant proposes enterprise behavior
+- **WHEN** a proposal requests runtime case execution, compensation, deployment, permissions, or arbitrary expressions
+- **THEN** validation rejects the operation before preview or mutation
+
+### Requirement: CMMN proposal application
+Approved CMMN proposals SHALL use supported `cmmn-js` modeling services and the existing confined file operations, automatic persistence, before-state capture, rollback, and assistant-level revert behavior. A failed mixed CMMN, BPMN, and Markdown proposal SHALL NOT report partial success.
+
+#### Scenario: Approved CMMN documentation proposal succeeds
+- **WHEN** an approved proposal adds a supported CMMN plan item and updates its Documentation successfully
+- **THEN** the CMMN XML and Markdown save through their existing paths and the complete change can be reverted
