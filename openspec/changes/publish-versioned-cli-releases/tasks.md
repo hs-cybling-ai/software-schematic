@@ -34,6 +34,6 @@
 
 - [x] 5.1 Extend repository verification to test release metadata and packaging without requiring release-write permissions or creating GitHub resources.
 - [x] 5.2 Run existing web tests/build, Rust formatting/tests/release build, OpenSpec validation, and the new packaging tests on macOS.
-- [ ] 5.3 Run the release workflow in manual non-publishing mode for every available hosted target and confirm the expected temporary archives, legal notices, checksums, manifest, and executable smoke evidence.
+- [x] 5.3 Run the release workflow in manual non-publishing mode for every available hosted target and confirm the expected temporary archives, legal notices, checksums, manifest, and executable smoke evidence.
 - [x] 5.4 Exercise failure cases for tag/version mismatch, a failed matrix target, incomplete artifact sets, and an existing release, confirming no public asset is created or overwritten.
-- [ ] 5.5 Create a disposable prerelease tag for an end-to-end owner-approved test, inspect downloads and provenance, then retain or remove that prerelease according to the documented release procedure.
+- [x] 5.5 Create the owner-approved first public release as the end-to-end publication test, then inspect its downloads, checksums, archive contents, and provenance according to the documented release procedure.
