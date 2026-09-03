@@ -12,6 +12,11 @@ Thank you for improving Software Schematic.
 4. Run `./scripts/verify-release.sh` before submitting a change.
 5. Run `./scripts/verify-release.sh --clean-export` for release-affecting changes.
 
+Changes to versioning, packaging, supported targets, or GitHub Release behavior
+must also follow the test and review expectations in
+[`docs/releases.md`](docs/releases.md). Never move or reuse a published version
+tag.
+
 ## Generated and bundled assets
 
 `npm run build --prefix software-schematic-web` replaces the hashed production

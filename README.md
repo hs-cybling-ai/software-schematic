@@ -37,6 +37,55 @@ On macOS, install ONNX Runtime with `brew install onnxruntime` to run MCP tests
 and the local MCP server. Windows users provide `onnxruntime.dll` beside the
 installed `.ss\bin\ss.exe` for MCP use.
 
+## Download a release
+
+Download the [latest stable release](https://github.com/hs-cybling-ai/software-schematic/releases/latest),
+or select a pinned version from [all releases](https://github.com/hs-cybling-ai/software-schematic/releases).
+
+| Platform | Release archive |
+| --- | --- |
+| Apple Silicon macOS | `software-schematic-vVERSION-aarch64-apple-darwin.tar.gz` |
+| Intel macOS | `software-schematic-vVERSION-x86_64-apple-darwin.tar.gz` |
+| Windows x64 | `software-schematic-vVERSION-x86_64-pc-windows-msvc.zip` |
+
+Download the matching archive and `SHA256SUMS` from the same release. On macOS,
+verify and extract it with:
+
+```sh
+shasum -a 256 -c SHA256SUMS --ignore-missing
+tar -xzf software-schematic-vVERSION-aarch64-apple-darwin.tar.gz
+cd software-schematic-vVERSION-aarch64-apple-darwin
+./ss init /path/to/project
+```
+
+Replace the target name for an Intel Mac. On Windows PowerShell, verify the
+published digest, extract, and initialize with:
+
+```powershell
+(Get-FileHash .\software-schematic-vVERSION-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash
+Expand-Archive .\software-schematic-vVERSION-x86_64-pc-windows-msvc.zip
+.\software-schematic-vVERSION-x86_64-pc-windows-msvc\software-schematic-vVERSION-x86_64-pc-windows-msvc\ss.exe init C:\path\to\project
+```
+
+Compare the PowerShell digest with the matching line in `SHA256SUMS`. With the
+[GitHub CLI](https://cli.github.com/) installed, verify that an archive was
+built by this repository's GitHub Actions workflow:
+
+```sh
+gh attestation verify software-schematic-vVERSION-TARGET.EXT \
+  --repo hs-cybling-ai/software-schematic
+```
+
+Release binaries are not currently signed or notarized. macOS Gatekeeper or
+Windows SmartScreen may therefore request confirmation before first use.
+Checksums and GitHub attestations verify integrity and build provenance but do
+not replace platform code signing.
+
+After `ss init`, follow the platform wrapper instructions below. MCP embeddings
+still require native ONNX Runtime as described under Supported targets. Build
+from source if no archive matches the system or the release needs to be audited
+locally.
+
 ## Build and verify from source
 
 Run the canonical verification workflow from the repository root:
@@ -133,6 +182,7 @@ implementation scope.
 
 The retained-file rationale and publication gates are documented in
 [repository scope](docs/repository-scope.md).
+Maintainers publish binaries using the [release procedure](docs/releases.md).
 
 ## Contributing and security
 

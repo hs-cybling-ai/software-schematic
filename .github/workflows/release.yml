@@ -1,0 +1,201 @@
+name: Release CLI
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: "Version ref to validate (blank uses the Cargo version; manual runs never publish)"
+        required: false
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            executable: software-schematic-cli/target/aarch64-apple-darwin/release/ss
+            skip_native_model_test: "0"
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            executable: software-schematic-cli/target/x86_64-apple-darwin/release/ss
+            skip_native_model_test: "0"
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            executable: software-schematic-cli/target/x86_64-pc-windows-msvc/release/ss.exe
+            skip_native_model_test: "1"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: software-schematic-web/package-lock.json
+      - name: Install stable Rust target
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+          rustup target add "${{ matrix.target }}"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('software-schematic-cli/Cargo.lock') }}
+      - name: Install OpenSpec
+        shell: bash
+        run: npm install --global @fission-ai/openspec@1.4.1
+      - name: Install ONNX Runtime on macOS
+        if: runner.os == 'macOS'
+        run: brew install onnxruntime
+      - name: Resolve and verify release version
+        id: release
+        shell: bash
+        env:
+          INPUT_RELEASE_REF: ${{ inputs.release_ref }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -n "$INPUT_RELEASE_REF" ]; then
+              node scripts/release.mjs metadata --ref "$INPUT_RELEASE_REF" --github-output
+            else
+              node scripts/release.mjs metadata --github-output
+            fi
+          else
+            node scripts/release.mjs metadata --ref "$GITHUB_REF_NAME" --github-output
+          fi
+      - name: Verify tracked release source
+        shell: bash
+        env:
+          SSW_SKIP_NATIVE_MODEL_TEST: ${{ matrix.skip_native_model_test }}
+        run: ./scripts/verify-release.sh --clean-export
+      - name: Build explicit release target
+        shell: bash
+        run: cargo build --locked --release --target "${{ matrix.target }}" --manifest-path software-schematic-cli/Cargo.toml
+      - name: Smoke-test native executable
+        shell: bash
+        run: |
+          "${{ matrix.executable }}" --version
+          smoke_root=$(mktemp -d "${RUNNER_TEMP}/ss-release-smoke.XXXXXX")
+          "${{ matrix.executable }}" init "$smoke_root/project"
+          test -f "$smoke_root/project/.ss/NOTICE"
+      - name: Package target archive
+        shell: bash
+        run: node scripts/release.mjs package --ref "${{ steps.release.outputs.ref }}" --target "${{ matrix.target }}" --binary "${{ matrix.executable }}" --output-dir release-dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: release-dist/
+          if-no-files-found: error
+          retention-days: 3
+
+  assemble:
+    name: Validate complete release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      ref: ${{ steps.release.outputs.ref }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: release-dist
+          merge-multiple: true
+      - name: Resolve release version
+        id: release
+        shell: bash
+        env:
+          INPUT_RELEASE_REF: ${{ inputs.release_ref }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -n "$INPUT_RELEASE_REF" ]; then
+              node scripts/release.mjs metadata --ref "$INPUT_RELEASE_REF" --github-output
+            else
+              node scripts/release.mjs metadata --github-output
+            fi
+          else
+            node scripts/release.mjs metadata --ref "$GITHUB_REF_NAME" --github-output
+          fi
+      - name: Create and verify manifest
+        shell: bash
+        run: |
+          node scripts/release.mjs finalize --ref "${{ steps.release.outputs.ref }}" --input-dir release-dist
+          node scripts/release.mjs validate --ref "${{ steps.release.outputs.ref }}" --input-dir release-dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: complete-release-${{ steps.release.outputs.ref }}
+          path: release-dist/
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Publish GitHub Release
+    if: github.event_name == 'push'
+    needs: assemble
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: complete-release-${{ needs.assemble.outputs.ref }}
+          path: release-dist
+      - name: Refuse an existing release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ needs.assemble.outputs.ref }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists: ${{ needs.assemble.outputs.ref }}" >&2
+            exit 1
+          fi
+      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-path: |
+            release-dist/*.tar.gz
+            release-dist/*.zip
+      - name: Publish complete release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REF: ${{ needs.assemble.outputs.ref }}
+          IS_PRERELEASE: ${{ needs.assemble.outputs.prerelease }}
+        run: |
+          prerelease_flag=""
+          if [ "$IS_PRERELEASE" = "true" ]; then prerelease_flag="--prerelease"; fi
+          gh release create "$RELEASE_REF" \
+            release-dist/*.tar.gz release-dist/*.zip \
+            release-dist/SHA256SUMS release-dist/release-manifest.json \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
+            --title "Software Schematic $RELEASE_REF" $prerelease_flag

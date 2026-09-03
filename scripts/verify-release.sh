@@ -39,6 +39,8 @@ done
 
 for required in \
   LICENSE NOTICE THIRD_PARTY_NOTICES.md \
+  scripts/release.mjs scripts/release.test.mjs \
+  .github/workflows/release.yml docs/releases.md \
   software-schematic-cli/Cargo.toml software-schematic-cli/Cargo.lock \
   software-schematic-cli/assets/starter.cmmn \
   software-schematic-cli/assets/starter.bpmn \
@@ -53,6 +55,7 @@ done
 npm ci --prefix software-schematic-web
 npm test --prefix software-schematic-web
 npm run build --prefix software-schematic-web
+node --test scripts/release.test.mjs
 
 cargo fmt --manifest-path software-schematic-cli/Cargo.toml --check
 if [ "${SSW_SKIP_NATIVE_MODEL_TEST:-0}" = "1" ]; then
@@ -74,6 +77,18 @@ if [ "${OS:-}" = "Windows_NT" ]; then
   release_bin=software-schematic-cli/target/release/ss.exe
 fi
 test -x "$release_bin" || { echo "Release executable missing: $release_bin" >&2; exit 1; }
+
+release_target=x86_64-apple-darwin
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) release_target=aarch64-apple-darwin ;;
+  Darwin-x86_64) release_target=x86_64-apple-darwin ;;
+  MINGW*-x86_64|MSYS*-x86_64) release_target=x86_64-pc-windows-msvc ;;
+esac
+release_dist=$(mktemp -d "${TMPDIR:-/tmp}/software-schematic-package.XXXXXX")
+node scripts/release.mjs package --target "$release_target" --binary "$release_bin" --output-dir "$release_dist"
+node scripts/release.mjs finalize --input-dir "$release_dist" --targets "$release_target"
+node scripts/release.mjs validate --input-dir "$release_dist" --targets "$release_target"
+rm -rf "$release_dist"
 
 smoke_root=$(mktemp -d "${TMPDIR:-/tmp}/software-schematic-smoke.XXXXXX")
 trap 'rm -rf "$smoke_root"' EXIT HUP INT TERM
