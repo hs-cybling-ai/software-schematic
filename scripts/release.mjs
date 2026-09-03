@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, copyFileSync, chmodSync, readdirSync, utimesSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, copyFileSync, chmodSync, readdirSync, utimesSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
@@ -53,8 +53,8 @@ function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
-function run(command, args) {
-  const result = spawnSync(command, args, { stdio: 'inherit' });
+function run(command, args, options = {}) {
+  const result = spawnSync(command, args, { stdio: 'inherit', ...options });
   if (result.status !== 0) fail(`Command failed: ${command} ${args.join(' ')}`);
 }
 
@@ -64,7 +64,7 @@ function archiveName(version, target) {
 }
 
 function listArchive(path) {
-  const result = spawnSync('tar', ['-tf', path], { encoding: 'utf8' });
+  const result = spawnSync('tar', ['-tf', basename(path)], { cwd: dirname(path), encoding: 'utf8' });
   if (result.status !== 0) fail(`Unable to inspect archive: ${path}`);
   return result.stdout.split(/\r?\n/).filter((entry) => entry && !entry.endsWith('/')).map((entry) => entry.replace(/^\.\//, ''));
 }
@@ -93,8 +93,10 @@ function packageTarget(options) {
     const archiveTime = new Date('1980-01-01T00:00:00Z');
     for (const entry of [config.executable, ...legalFiles]) utimesSync(join(stage, entry), archiveTime, archiveTime);
     utimesSync(stage, archiveTime, archiveTime);
-    if (config.archive === 'zip') run('tar', ['-a', '-cf', archive, '-C', temporary, directoryName]);
-    else run('tar', ['-czf', archive, '-C', temporary, directoryName]);
+    const temporaryArchive = join(temporary, name);
+    if (config.archive === 'zip') run('tar', ['-a', '-cf', name, directoryName], { cwd: temporary });
+    else run('tar', ['-czf', name, directoryName], { cwd: temporary });
+    renameSync(temporaryArchive, archive);
     const record = { ...metadata, target, executable: config.executable, archive: name, sha256: sha256(archive) };
     writeFileSync(targetMetadata, `${JSON.stringify(record, null, 2)}\n`);
     process.stdout.write(`${JSON.stringify(record)}\n`);
