@@ -6,7 +6,7 @@ There is one stored Name field. A process Name is `package.Process`; a node or e
 
 Qualified process Names determine composition folders. For example, `cybling.subscription.SelectAndOutfit` owns `schematics/cybling/subscription/SelectAndOutfit/`, including `main.bpmn`, `main.md`, `docs/`, and local assets. Two nodes with the same qualified process Name open this same composition regardless of their BPMN IDs or Labels. Members do not create composition folders.
 
-Changing a task or event Name updates only its member symbol. Renaming a child process renames its composition folder and updates local qualified references. The root `schematics/main.bpmn` remains the project navigation diagram.
+Changing a task or event Name updates only its member symbol. Renaming a child process renames its composition folder and updates local qualified references. The root `schematics/main.cmmn` remains the project navigation diagram; `main.bpmn` is retained only as a legacy fallback when no CMMN anchor exists.
 
 Process documentation is `main.md` in the process folder. Node and edge documentation is bound to the BPMN ID at `docs/<element-id>.md`. Two call activities can therefore keep distinct call-site documentation while both opening the same named subprocess and its shared `main.md`. A Name change never renames element documentation; an ID change does.
 

@@ -1,71 +1,151 @@
-# Diagram Studio
+# Software Schematic
 
-Software Schematic's reusable BPMN identity and deterministic folder conventions are documented in [Scoped process naming](docs/scoped-process-naming.md).
+Software Schematic is a lightweight, project-local documentation and modeling
+tool for software development. It installs a self-contained browser editor,
+CMMN business context, BPMN design diagrams, Markdown documentation, and a
+query-only MCP graph beside the code that those documents describe.
 
-Project-local model-driven development through the compiled Grafeo graph and MCP service is documented in [Project-local schematic MCP](docs/software-schematic-mcp.md).
+Software Schematic is an open-source project owned by Cybling Labs, Inc.
+Cybling Labs also makes the separate [cybling.ai](https://cybling.ai) platform;
+using this project does not require cybling.ai.
 
-Diagram Studio is a sandboxed native macOS 14+ workspace focused on Data Graph diagrams, with BPMN retained as the interaction benchmark and a supported format. The application shell is SwiftUI/AppKit; each retained editor tab hosts a fully local `WKWebView` bundle.
+## What it installs
 
-## Developer setup
+Running `ss init` in an empty project creates:
 
-Requirements: macOS 14+, full Xcode selected with `xcode-select`, Node.js 24 LTS or newer, npm, and XcodeGen.
-
-```sh
-cd web-editor
-npm ci
-npm run verify
-cd ..
-xcodegen generate
-xcodebuild -project DiagramStudio.xcodeproj -scheme DiagramStudio test
+```text
+.ss/                 versioned runtime, browser assets, model, and notices
+.codex/config.toml   project-scoped Software Schematic MCP registration
+schematics/          CMMN/BPMN diagrams and Markdown documentation
+AGENTS.md            managed model-driven development guidance
+ssw / ssw.cmd        project-local macOS and Windows launchers
 ```
 
-The Xcode target runs `scripts/build-web-assets.sh` before compilation. Production editor assets are copied into the app bundle; the runtime does not use a CDN or network service.
+The installed application runs on an available loopback port. Browser code,
+styles, fonts, diagram modelers, templates, and embeddings are local; no CDN or
+package registry is needed at runtime. ONNX Runtime is required only for MCP
+embeddings, not for the diagram editor.
 
-## Supported files
+## Supported targets
 
-- BPMN 2.0 XML: `.bpmn`, `.bpmn20.xml`
-- Diagram Studio Data Graph: `.dgraph`, paired with `.context.sqlite` when node context is captured
+- macOS 13 or newer on Apple Silicon and Intel
+- Windows 10 or newer on x64
 
-Data Graph diagrams are saved as a normalized ontology property graph containing `nodes`, `edges`, `properties`, and a `contextStore` manifest. Full-size `objectNode` circles represent object types. First-class, double-outline `edgeNode` circles define relationships with scalar (`0..1`), stack, queue, set, and map semantics. A `domain` edge connects `objectNode → edgeNode`; a `range` edge connects `edgeNode → objectNode`. Generated IDs use `<edge-node-id>_domain` and `<edge-node-id>_range_<target-node-id>`.
+The installed executable does not require Rust, Node.js, or npm. Building from
+source requires a current stable Rust toolchain, Node.js 24 or newer, and npm.
+On macOS, install ONNX Runtime with `brew install onnxruntime` to run MCP tests
+and the local MCP server. Windows users provide `onnxruntime.dll` beside the
+installed `.ss\bin\ss.exe` for MCP use.
 
-Selecting a node opens a right-side Markdown inspector with CodeMirror source editing and a sanitized preview. Capture embeds every changed Markdown section with Apple's local sentence-embedding model and stores the section text, SHA-256 hash, node metadata, provider/model provenance, and packed Float32 vector together in `name.context.sqlite`. Capture commits one complete SQLite revision before atomically advancing the manifest in `name.dgraph`; failures retain the prior authoritative revision. Move, back up, and restore the `.dgraph` and `.context.sqlite` files together.
+## Build and verify from source
 
-SQLite context defaults are 1 MiB per Markdown section, 2,048 sections per capture, 16,384 vector dimensions, and 512 MiB per database. Unreferenced revisions after an interrupted manifest write are recoverable and can be compacted. A future Codex tool can use direct IDs, lexical matching, compatible vector similarity, and bounded graph-neighborhood expansion through the documented retrieval contract in `docs/context-retrieval.md`.
+Run the canonical verification workflow from the repository root:
 
-Objects offer two connection choices. **Relationship** ends at a scalar `edgeNode` when no target object is reached, or places that edge node midway between the source and target objects. **Object link** creates a direct dashed object-to-object edge with a semantic modifier. The initial modifiers are `sameAs` and `subclassOf`; both let the source resolve the target object's existing relationships without copying them into the stored graph. Resolution is deterministic and cycle-safe.
+```sh
+./scripts/verify-release.sh
+```
 
-Typed property definitions are stored in `properties` with an `ownerId` referencing a node or topology edge. Their datatype marks are compact and explicit (`STR`, `INT`, `BYTE`, `URI`, and the catalog below) rather than color-coded. URI properties define identifiers or resource references such as an object `id` or `companyUrn`; URNs are represented by the broader URI datatype.
+For a release candidate, verify an isolated export containing only tracked and
+new candidate source files:
 
-Functions are first-class `mutationNode` nodes. A `modifier` edge connects a mutation node to either an `edgeNode`, meaning the function applies to that relationship in the context of its domain object, or directly to an `objectNode`, meaning it operates on that object type. Query functions that return collection items use `←ƒ`, functions that update the collection use `ƒ→`, and functions that modify internal domain-object state use `ƒ`. Mutation parameters are properties owned by the mutation node—for example, `add(companyUrn)` or `searchCompanies(name)`. Runtime mutation classes, collections, lookup behavior, and dynamic binding are future implementation concerns rather than part of the diagram schema.
+```sh
+./scripts/verify-release.sh --clean-export
+```
 
-Property ownership is rendered as a short-dash line without an arrow or edge label. Object links use a longer dashed pattern and a directional arrow; `subclassOf` adds a solid circle at the source, while `sameAs` has no source marker. Mutation modifier edges are solid and end in a black circle. Domain and range edges retain standard directional arrows.
+The workflow installs exact web dependencies from
+`software-schematic-web/package-lock.json`, runs  web and Rust tests, rebuilds
+the embedded production web bundle, builds the release CLI, validates OpenSpec,
+checks repository scope and required assets/notices, and smoke-tests `init` and
+non-destructive `update` in temporary projects.
 
-Select a property, mutation, edge node, or object link and use its wrench action to choose a type or link modifier from the labeled menu. Objects, properties, mutations, and edge nodes can be dragged freely and persist independently. Select an edge node to connect or create target objects or to attach a property or mutation.
+Individual development commands are:
 
-Supported property datatypes are String (`STR`), Integer (`INT`), Byte (`BYTE`), Boolean (`BOOL`), Decimal (`DEC`), Float (`FLT`), Long (`LONG`), Date (`DATE`), Time (`TIME`), Date and time (`DT`), UUID (`UUID`), URI (`URI`), JSON (`JSON`), and Binary (`BIN`). Intermediate icons use three horizontal lines for stack, three vertical lines for queue, `{}` for set, and `{:}` for map.
+```sh
+npm ci --prefix software-schematic-web
+npm test --prefix software-schematic-web
+npm run build --prefix software-schematic-web
+cargo fmt --manifest-path software-schematic-cli/Cargo.toml --check
+cargo test --manifest-path software-schematic-cli/Cargo.toml
+cargo build --release --manifest-path software-schematic-cli/Cargo.toml
+openspec validate --all
+```
 
-The Data Graph document definition is still under development. `.dgraph.json` is no longer canonical; the workspace service provides explicit migration to `.dgraph`. Older filter/color-based development documents remain unsupported.
+The web build writes hashed production files to
+`software-schematic-cli/assets/web/`. Those generated assets are committed
+because the Rust release embeds them to produce an offline executable.
 
-Files are limited to 20 MB. Symlinks resolving outside the selected folder are excluded. Saves use atomic replacement and prompt before overwriting an externally changed source.
+## Install into a project
 
-## Commands
+After building, initialize a new project:
 
-- Open Folder: ⇧⌘O
-- Save: ⌘S
-- Save All: ⌥⌘S
-- Close Tab: ⌘W
+```sh
+./software-schematic-cli/target/release/ss init /path/to/project
+cd /path/to/project
+./ssw
+```
 
-## Updating diagram dependencies
+On Windows, use the matching `ss.exe` and run `ssw.cmd`. Initialization refuses
+to overwrite existing `.ss`, `schematics`, or wrapper paths.
 
-Query stable releases, update exact versions in `web-editor/package.json`, run `npm install`, then run `npm audit` and `npm run verify`. Commit the resulting lockfile only if both real compatibility fixtures import/export successfully. See [docs/compatibility.md](docs/compatibility.md) for the current split dependency graph and known ArchiMate workarounds.
+To refresh an existing compatible installation while preserving authored
+diagrams, Markdown, unrelated Codex configuration, and unrelated `AGENTS.md`
+content:
 
-## Manual acceptance
+```sh
+./ssw update
+```
 
-1. Launch in dark mode and open a folder containing all three fixture formats.
-2. Confirm nested supported files appear and unsupported files do not.
-3. Open several diagrams, switch tabs, make edits, and verify dirty indicators persist.
-4. Save each format, close it, reopen it, and verify the edit remains.
-5. Modify an open source externally and verify Overwrite/Reload/Cancel appears.
-6. Exercise Save/Don’t Save/Cancel while closing a dirty tab, replacing the folder, and quitting.
-7. Disconnect networking and confirm all editors and fonts/icons still load.
-8. Select each node kind, edit and preview Markdown, Capture, close and reopen the diagram, and confirm the paired SQLite content is restored.
+## Modeling workflow
+
+`schematics/main.cmmn` is the project anchor for domain context, actors, needs,
+business services, and links to BPMN designs. Named CMMN Process Tasks open
+reusable BPMN compositions. Every supported node or edge can carry a stable
+ID, label, architectural Name, Implementation Status, and ID-bound Markdown.
+
+The browser editor saves complete CMMN/BPMN XML and Markdown automatically. A
+successful save asks a running project MCP to rebuild the complete graph rooted
+at `main.cmmn`. Unreachable diagrams are excluded, and stale connections to
+deleted elements are skipped with warnings rather than blocking the refresh.
+
+See [AI diagram assistance](docs/ai-diagram-assistant.md),
+[scoped process naming](docs/scoped-process-naming.md), and
+[project-local schematic MCP](docs/software-schematic-mcp.md) for detailed use.
+
+## Codex and MCP
+
+Initialization adds a project-scoped MCP entry. Trust or activate the
+repository configuration in Codex and start a fresh task if registration has
+just changed. Verify the project identity with `get_project_model` before using
+graph context for development.
+
+The MCP tools are query-only. Human-reviewed diagrams and documentation remain
+the source of truth, and only elements marked `new` or `modify` authorize
+implementation scope.
+
+## Project layout
+
+- `software-schematic-cli/` — Rust CLI, server, graph/MCP, tests, templates,
+  embedded production bundle, and model assets.
+- `software-schematic-web/` — browser editor source, tests, and pinned npm graph.
+- `docs/` — focused operating and architecture documentation.
+- `openspec/` — current normative specifications and active change artifacts.
+- `scripts/` — release verification entry point.
+
+The retained-file rationale and publication gates are documented in
+[repository scope](docs/repository-scope.md).
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before changing source, generated assets,
+dependencies, or specifications. Report vulnerabilities using the private
+process in [SECURITY.md](SECURITY.md), not a public issue.
+
+## License
+
+Original Software Schematic work is copyright 2026 Cybling Labs, Inc. and is
+licensed under the [Apache License 2.0](LICENSE). Third-party components remain
+under their own terms; see [NOTICE](NOTICE) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+The Apache License does not grant rights to Cybling Labs, Cybling,
+Software Schematic, or cybling.ai trademarks beyond customary attribution.

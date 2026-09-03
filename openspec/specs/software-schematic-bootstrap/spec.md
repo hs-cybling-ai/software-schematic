@@ -5,11 +5,19 @@
 Provide a versioned, self-contained project-local CLI, wrapper, and loopback application runtime for Software Schematic workspaces.
 ## Requirements
 ### Requirement: Cross-platform single-executable CLI
-The system SHALL distribute `ss` as one self-contained native executable for each supported Windows and macOS target, and the executable SHALL provide the `init` command without requiring a language runtime or package manager.
+The maintained source distribution SHALL build `ss` as one self-contained native executable for each supported Windows and macOS target. Each executable SHALL provide the `init`, `update`, `serve`, authentication, and MCP commands without requiring a language runtime or package manager after installation, and SHALL carry the project license, notice, required third-party notices, bundled web application, starter documents, and embedding assets needed by those commands.
 
 #### Scenario: Run the CLI on a supported target
 - **WHEN** a user invokes the matching `ss` executable on Windows or macOS
-- **THEN** the CLI runs without requiring Node.js, Rust, or another separately installed runtime
+- **THEN** the CLI runs without requiring Node.js, Rust, or another separately installed language runtime
+
+#### Scenario: Build the CLI from the public source tree
+- **WHEN** a contributor follows the documented clean-checkout release workflow on a supported build host
+- **THEN** the workflow produces the self-contained executable entirely from retained source, lockfiles, and bundled assets without any retired native-editor or Data Graph directory
+
+#### Scenario: Inspect an installed distribution
+- **WHEN** a user initializes or updates a project with the release executable
+- **THEN** the installed runtime contains the applicable Software Schematic license, Cybling Labs notice, required third-party notices, browser assets, templates, and model assets
 
 ### Requirement: Project initialization
 The `ss init` command SHALL initialize the current directory with `.ss/`, `schematics/`, platform wrapper launchers, a managed project `.codex/config.toml` MCP entry, and a managed Software Schematic block in root `AGENTS.md`, including a versioned runtime, bundled web and embedding assets, `schematics/main.cmmn`, and `schematics/main.md`. The MCP entry SHALL launch the pinned project wrapper and derive the project root from that wrapper. The managed instructions SHALL require project-identity verification, treat diagrams and Markdown as the detailed contract, send natural proposal language to MCP, record the resolved root identity, link every task to authorized nodes, and implement only returned `new` or `modify` scope.
@@ -94,4 +102,3 @@ Initialized project documentation SHALL explain that project `.codex/config.toml
 #### Scenario: User opens the initialized project in Codex
 - **WHEN** Codex has not yet activated the repository's project configuration
 - **THEN** the documentation provides the activation and verification steps without recommending a global Software Schematic MCP registration
-

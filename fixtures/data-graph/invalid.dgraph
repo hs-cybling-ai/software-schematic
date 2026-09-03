@@ -1,8 +1,0 @@
-{
-  "format": "diagram-studio/data-graph",
-  "version": 2,
-  "nodes": [{ "id": "broken", "type": "object", "label": "Broken", "x": 0, "y": 0 }],
-  "edges": [],
-  "properties": [],
-  "contextStore": { "kind": "sqlite", "uri": "invalid.context.sqlite", "schemaVersion": 1, "diagramId": "fixture-invalid", "revision": 0 }
-}

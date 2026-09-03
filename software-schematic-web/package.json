@@ -2,6 +2,7 @@
   "name": "software-schematic-web",
   "version": "0.1.7",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "build": "vite build",

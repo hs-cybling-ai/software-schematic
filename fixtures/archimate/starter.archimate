@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<model xmlns="http://www.opengroup.org/xsd/archimate/3.0/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" identifier="model-1">
-  <name xml:lang="en">New Architecture</name>
-  <elements />
-  <views><diagrams><view identifier="view-1" xsi:type="Diagram"><name xml:lang="en">Overview</name></view></diagrams></views>
-</model>

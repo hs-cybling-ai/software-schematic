@@ -2,8 +2,8 @@
 name = "software-schematic-cli"
 version = "0.1.7"
 edition = "2024"
-description = "Project-local software schematic editor"
-license = "MIT"
+description = "Project-local CMMN, BPMN, Markdown, and MCP documentation tool"
+license = "Apache-2.0"
 
 [[bin]]
 name = "ss"

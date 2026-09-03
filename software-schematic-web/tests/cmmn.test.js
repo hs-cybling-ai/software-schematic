@@ -5,8 +5,7 @@ import CmmnModdle from 'cmmn-moddle/lib/simple.js';
 import ssw from '../src/ssw-cmmn-moddle.json';
 import { cmmnDefinitionFor, cmmnLabelFor, cmmnMetadataFor, updateCmmnProperties } from '../src/diagram-adapters.ts';
 
-const root = resolve(import.meta.dirname, '../..');
-const readFixture = (name) => readFileSync(resolve(root, `fixtures/cmmn/${name}.cmmn`), 'utf8');
+const readFixture = (name) => readFileSync(resolve(import.meta.dirname, `fixtures/cmmn/${name}.cmmn`), 'utf8');
 
 function parse(moddle, xml) {
   return new Promise((resolvePromise, reject) => moddle.fromXML(xml, (error, definitions, context) => error ? reject(error) : resolvePromise({ definitions, warnings: context.warnings || [] })));

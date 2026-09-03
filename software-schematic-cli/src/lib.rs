@@ -132,6 +132,9 @@ static MODEL_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets/models")
 const STARTER_BPMN: &str = include_str!("../assets/starter.bpmn");
 const STARTER_CMMN: &str = include_str!("../assets/starter.cmmn");
 const STARTER_MD: &str = include_str!("../assets/starter.md");
+const PROJECT_LICENSE: &str = include_str!("../../LICENSE");
+const PROJECT_NOTICE: &str = include_str!("../../NOTICE");
+const THIRD_PARTY_NOTICES: &str = include_str!("../../THIRD_PARTY_NOTICES.md");
 const MAC_WRAPPER: &str = "#!/bin/sh\nset -eu\nSCRIPT_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\ncase \"${1:-}\" in\n  auth) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" auth --project \"$SCRIPT_DIR\" \"$@\" ;;\n  mcp) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" mcp --project \"$SCRIPT_DIR\" \"$@\" ;;\n  update) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" update --project \"$SCRIPT_DIR\" \"$@\" ;;\nesac\nexec \"$SCRIPT_DIR/.ss/bin/ss\" serve --project \"$SCRIPT_DIR\" \"$@\"\n";
 const WINDOWS_WRAPPER: &str = "@echo off\r\nsetlocal\r\nif \"%~1\"==\"auth\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" auth --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"mcp\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" mcp --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"update\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" update --project \"%~dp0\" %*\r\n) else (\r\n  \"%~dp0.ss\\bin\\ss.exe\" serve --project \"%~dp0\" %*\r\n)\r\n";
 
@@ -211,6 +214,9 @@ pub fn init_project(project: impl AsRef<Path>) -> Result<ProjectLayout> {
         serde_json::to_vec_pretty(&assistant::operation_plan_schema()).unwrap(),
     )?;
     fs::write(tool.join("starter.cmmn"), STARTER_CMMN)?;
+    fs::write(tool.join("LICENSE"), PROJECT_LICENSE)?;
+    fs::write(tool.join("NOTICE"), PROJECT_NOTICE)?;
+    fs::write(tool.join("THIRD_PARTY_NOTICES.md"), THIRD_PARTY_NOTICES)?;
     fs::write(schematics.join("main.cmmn"), STARTER_CMMN)?;
     fs::write(schematics.join("main.md"), STARTER_MD)?;
     fs::write(project.join("ssw"), MAC_WRAPPER)?;
@@ -262,6 +268,9 @@ pub fn update_project(project: impl AsRef<Path>) -> Result<ProjectLayout> {
         tool.join("operation-plan.schema.json"),
         serde_json::to_vec_pretty(&assistant::operation_plan_schema()).unwrap(),
     )?;
+    fs::write(tool.join("LICENSE"), PROJECT_LICENSE)?;
+    fs::write(tool.join("NOTICE"), PROJECT_NOTICE)?;
+    fs::write(tool.join("THIRD_PARTY_NOTICES.md"), THIRD_PARTY_NOTICES)?;
     fs::write(project.join("ssw"), MAC_WRAPPER)?;
     fs::write(project.join("ssw.cmd"), WINDOWS_WRAPPER)?;
     write_project_id(&tool, &project)?;
@@ -1092,6 +1101,18 @@ mod tests {
         assert!(layout.tool.join("web/index.html").is_file());
         assert!(layout.tool.join("operation-plan.schema.json").is_file());
         assert!(layout.tool.join("starter.cmmn").is_file());
+        assert_eq!(
+            fs::read_to_string(layout.tool.join("LICENSE")).unwrap(),
+            PROJECT_LICENSE
+        );
+        assert_eq!(
+            fs::read_to_string(layout.tool.join("NOTICE")).unwrap(),
+            PROJECT_NOTICE
+        );
+        assert_eq!(
+            fs::read_to_string(layout.tool.join("THIRD_PARTY_NOTICES.md")).unwrap(),
+            THIRD_PARTY_NOTICES
+        );
         assert!(layout.tool.join("web/vendor").is_dir());
         assert!(layout.schematics.join("main.cmmn").is_file());
         assert!(!layout.schematics.join("main.bpmn").exists());
@@ -1139,6 +1160,7 @@ mod tests {
     fn update_preserves_authored_files_and_is_idempotent_with_crlf() {
         let (directory, layout) = initialized();
         let diagram_before = fs::read(layout.schematics.join("main.cmmn")).unwrap();
+        fs::write(layout.tool.join("NOTICE"), "stale managed notice").unwrap();
         fs::write(directory.path().join("AGENTS.md"), "authored\r\n\r\n<!-- software-schematic:begin -->\r\nstale\r\n<!-- software-schematic:end -->\r\ntail\r\n").unwrap();
         fs::write(directory.path().join(".codex/config.toml"), "theme = \"dark\"\n\n[mcp_servers.other]\ncommand = \"other\"\n\n[mcp_servers.software_schematic]\ncommand = \"stale\"\n").unwrap();
         update_project(directory.path()).unwrap();
@@ -1166,6 +1188,10 @@ mod tests {
         assert_eq!(
             diagram_before,
             fs::read(layout.schematics.join("main.cmmn")).unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(layout.tool.join("NOTICE")).unwrap(),
+            PROJECT_NOTICE
         );
     }
 

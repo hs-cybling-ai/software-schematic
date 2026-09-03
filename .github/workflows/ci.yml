@@ -1,0 +1,39 @@
+name: Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  release-verification:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: software-schematic-web/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install OpenSpec
+        shell: bash
+        run: npm install --global @fission-ai/openspec@1.4.1
+      - name: Install ONNX Runtime on macOS
+        if: runner.os == 'macOS'
+        run: brew install onnxruntime
+      - name: Verify release tree
+        shell: bash
+        env:
+          SSW_SKIP_NATIVE_MODEL_TEST: ${{ runner.os == 'Windows' && '1' || '0' }}
+        run: ./scripts/verify-release.sh --clean-export
