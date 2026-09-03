@@ -6,7 +6,7 @@ export const MAX_OPERATIONS = 64;
 const ID = /^[A-Za-z][A-Za-z0-9_-]*$/;
 const TYPES = new Set(['bpmn:Task', 'bpmn:UserTask', 'bpmn:ServiceTask', 'bpmn:ManualTask', 'bpmn:SubProcess', 'bpmn:CallActivity', 'bpmn:StartEvent', 'bpmn:EndEvent', 'bpmn:ExclusiveGateway', 'bpmn:ParallelGateway']);
 const CMMN_TYPES = new Set(['cmmn:Task', 'cmmn:HumanTask', 'cmmn:ProcessTask', 'cmmn:CaseTask', 'cmmn:Stage', 'cmmn:Milestone', 'cmmn:EventListener']);
-const OPERATIONS = new Set(['replace_node_type', 'update_node_label', 'update_node_name', 'set_process_reference', 'create_process', 'open_process', 'rename_process', 'add_flow_node', 'connect_sequence_flow', 'add_plan_item', 'connect_cmmn', 'replace_diagram_markdown', 'replace_node_markdown']);
+const OPERATIONS = new Set(['replace_node_type', 'update_node_label', 'update_node_name', 'set_node_status', 'set_process_reference', 'create_process', 'open_process', 'rename_process', 'add_flow_node', 'connect_sequence_flow', 'add_plan_item', 'connect_cmmn', 'replace_diagram_markdown', 'replace_node_markdown']);
 
 export function normalizeAssistantPath(value) {
   const path = String(value || '').trim().replaceAll('\\', '/').replace(/^schematics\//, '');
@@ -142,6 +142,7 @@ export function validateProposal(proposal, snapshot, { currentRevision = snapsho
         if (reusable === Boolean(memberNameFromElementName(name))) throw new Error(reusable ? 'Reusable process Names cannot contain #' : 'Node Names require #');
       }
     }
+    if (operation.type === 'set_node_status' && !['open', 'new', 'modify', 'locked'].includes(operation.status)) throw new Error(`Unsupported node status: ${operation.status}`);
     if (operation.type === 'rename_process' && operation.oldQualifiedName !== snapshot.processName) throw new Error('Process rename does not match the active scoped identity');
     if (operation.type === 'replace_node_type' && !TYPES.has(operation.bpmnType)) throw new Error(`Unsupported BPMN replacement: ${operation.bpmnType}`);
     if (operation.type === 'connect_sequence_flow') {
@@ -176,6 +177,7 @@ function describeOperation(operation) {
     case 'replace_node_type': return `Replace ${operation.nodeId} with ${operation.bpmnType.replace('bpmn:', '')}`;
     case 'update_node_label': return `Rename ${operation.nodeId} to “${operation.label}”`;
     case 'update_node_name': return `Change Name of ${operation.nodeId} to ${operation.name}`;
+    case 'set_node_status': return `Set ${operation.nodeId} implementation status to ${operation.status}`;
     case 'set_process_reference': return `Link ${operation.nodeId} to ${operation.qualifiedName}`;
     case 'create_process': return `Create process ${operation.qualifiedName} at schematics/${compositionFolderForQualifiedName(operation.qualifiedName)}`;
     case 'open_process': return `Open process ${operation.qualifiedName}`;

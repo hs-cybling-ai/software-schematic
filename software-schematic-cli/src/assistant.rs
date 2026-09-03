@@ -87,10 +87,9 @@ impl AssistantProvider for FakeProvider {
             .pointer("/diagramPath")
             .and_then(Value::as_str)
             .unwrap_or("main.bpmn");
-        let operations = if request.prompt.to_ascii_lowercase().contains("subprocess")
-            && primary.is_some()
+        let operations = if let Some(node_id) =
+            primary.filter(|_| request.prompt.to_ascii_lowercase().contains("subprocess"))
         {
-            let node_id = primary.unwrap();
             let child = "assistant.AssistantSubprocess";
             let child_diagram = "assistant/AssistantSubprocess/main.bpmn";
             vec![
@@ -376,7 +375,7 @@ pub async fn generate(
     let provider = env::var("SSW_ASSISTANT_PROVIDER")
         .ok()
         .or(configured_provider)
-        .unwrap_or_else(|| "fake".into());
+        .ok_or_else(|| Error::Message("assistant is not configured; run ./ssw auth login in this project, then restart SSW".into()))?;
     let model = env::var("SSW_ASSISTANT_MODEL").unwrap_or_else(|_| {
         if provider == "openai" {
             "gpt-5.4".into()
@@ -467,6 +466,7 @@ pub fn validate_plan(plan: &AssistantPlan, request: &AssistantRequest) -> Result
         "replace_node_type",
         "update_node_label",
         "update_node_name",
+        "set_node_status",
         "set_process_reference",
         "create_process",
         "open_process",
@@ -565,6 +565,14 @@ pub fn validate_plan(plan: &AssistantPlan, request: &AssistantRequest) -> Result
             } else {
                 validate_element_name(name)?;
             }
+        }
+        if kind == "set_node_status"
+            && !matches!(
+                operation["status"].as_str(),
+                Some("open" | "new" | "modify" | "locked")
+            )
+        {
+            return Err(Error::Message("unsupported node status".into()));
         }
         if kind == "add_flow_node" && operation["name"].is_string() {
             let name = operation["name"].as_str().unwrap();
@@ -719,6 +727,7 @@ pub fn operation_plan_schema() -> Value {
                 operation(&["type", "diagramPath", "nodeId", "bpmnType"], json!({"type":{"type":"string","const":"replace_node_type"},"diagramPath":diagram_path,"nodeId":node_id,"bpmnType":{"type":"string"}})),
                 operation(&["type", "diagramPath", "nodeId", "label"], json!({"type":{"type":"string","const":"update_node_label"},"diagramPath":diagram_path,"nodeId":node_id,"label":{"type":"string"}})),
                 operation(&["type", "diagramPath", "nodeId", "name"], json!({"type":{"type":"string","const":"update_node_name"},"diagramPath":diagram_path,"nodeId":node_id,"name":{"type":"string"}})),
+                operation(&["type", "diagramPath", "nodeId", "status"], json!({"type":{"type":"string","const":"set_node_status"},"diagramPath":diagram_path,"nodeId":node_id,"status":{"type":"string","enum":["open","new","modify","locked"]}})),
                 operation(&["type", "diagramPath", "nodeId", "qualifiedName"], json!({"type":{"type":"string","const":"set_process_reference"},"diagramPath":diagram_path,"nodeId":node_id,"qualifiedName":qualified_name})),
                 operation(&["type", "qualifiedName"], json!({"type":{"type":"string","const":"create_process"},"qualifiedName":qualified_name})),
                 operation(&["type", "qualifiedName"], json!({"type":{"type":"string","const":"open_process"},"qualifiedName":qualified_name})),
@@ -793,7 +802,7 @@ mod tests {
             .unwrap()
             .as_array()
             .unwrap();
-        assert_eq!(variants.len(), 13);
+        assert_eq!(variants.len(), 14);
         assert!(
             variants
                 .iter()
@@ -807,6 +816,24 @@ mod tests {
                 .keys()
                 .all(|key| required.iter().any(|value| value == key))
         }));
+    }
+
+    #[test]
+    fn node_status_operations_accept_only_known_statuses() {
+        let mut plan = AssistantPlan {
+            version: SCHEMA_VERSION.into(),
+            request_id: "request-1".into(),
+            source_revision: "abc".into(),
+            summary: "Mark implementation work".into(),
+            assumptions: vec![],
+            warnings: vec![],
+            operations: vec![
+                json!({"type":"set_node_status","diagramPath":"main.bpmn","nodeId":"Task_1","status":"new"}),
+            ],
+        };
+        validate_plan(&plan, &request()).unwrap();
+        plan.operations[0]["status"] = json!("pending");
+        assert!(validate_plan(&plan, &request()).is_err());
     }
 
     #[test]

@@ -8,7 +8,8 @@
       "name": "NamedBaseElement",
       "extends": ["bpmn:BaseElement"],
       "properties": [
-        { "name": "architecturalName", "isAttr": true, "type": "String" }
+        { "name": "architecturalName", "isAttr": true, "type": "String" },
+        { "name": "implementationStatus", "isAttr": true, "type": "String" }
       ]
     },
     {

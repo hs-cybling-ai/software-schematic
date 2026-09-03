@@ -60,6 +60,8 @@ describe('assistant contracts', () => {
     expect(() => validateProposal({ ...plan, operations: [{ type: 'create_process', qualifiedName: 'sales.Order' }, { type: 'open_process', qualifiedName: 'sales.ORder' }] }, base)).toThrow(/collision/);
     expect(() => validateProposal({ ...plan, operations: [{ type: 'add_flow_node', nodeId: 'Task_1', bpmnType: 'bpmn:Task' }] }, base)).toThrow(/Duplicate/);
     expect(() => validateProposal({ ...plan, operations: [{ type: 'update_node_name', diagramPath: 'main.bpmn', nodeId: 'Task_1', name: 'work' }] }, base)).toThrow(/Qualified/);
+    expect(validateProposal({ ...plan, operations: [{ type: 'set_node_status', diagramPath: 'main.bpmn', nodeId: 'Task_1', status: 'new' }] }, base).operations[0].status).toBe('new');
+    expect(() => validateProposal({ ...plan, operations: [{ type: 'set_node_status', diagramPath: 'main.bpmn', nodeId: 'Task_1', status: 'pending' }] }, base)).toThrow(/Unsupported node status/);
     const locked = structuredClone(base); locked.graph.nodes[0].status = 'locked';
     expect(() => validateProposal({ ...plan, operations: [{ type: 'update_node_label', nodeId: 'Task_1', label: 'No' }] }, locked)).toThrow(/Locked/);
     expect(() => validateProposal(plan, base, { currentRevision: 'later' })).toThrow(/stale/);

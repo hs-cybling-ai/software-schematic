@@ -1,7 +1,7 @@
 import BpmnModeler from 'bpmn-js/lib/Modeler';
 import sswBpmnModdle from './ssw-moddle.json';
 import sswCmmnModdle from './ssw-cmmn-moddle.json';
-import { architecturalName, DIAGRAM_PACKAGE_ATTRIBUTE, diagramKind, packageNameForCmmnPath, resolveBpmnElementName, validatePackageName } from './core.js';
+import { architecturalName, DIAGRAM_PACKAGE_ATTRIBUTE, diagramKind, implementationStatus, normalizeNodeStatus, packageNameForCmmnPath, resolveBpmnElementName, validatePackageName } from './core.js';
 
 export type DiagramKind = 'bpmn' | 'cmmn';
 
@@ -20,9 +20,11 @@ export interface DiagramAdapter {
   isComposable(element: any): boolean;
   diagramName(path: string): string | null;
   elementName(element: any): string;
+  elementStatus(element: any): string;
   updateId(element: any, id: string): void;
   updateLabel(element: any, label: string): void;
   updateName(element: any, name: string): void;
+  updateStatus(element: any, status: string): void;
   normalizedElements(statuses: Map<string, string>): { nodes: any[]; flows: any[] };
 }
 
@@ -76,7 +78,7 @@ function normalized(modeler: any, statuses: Map<string, string>, kind: DiagramKi
     type: kind === 'cmmn' ? cmmnSemantic(item)?.$type || item.businessObject.$type : item.businessObject.$type,
     name: architecturalName(kind === 'cmmn' ? cmmnSemantic(item) : item.businessObject) || null,
     label: (kind === 'cmmn' ? cmmnSemantic(item)?.name : item.businessObject.name) || '',
-    status: statuses.get(item.id) || 'open',
+    status: statuses.get(item.id) || implementationStatus(kind === 'cmmn' ? cmmnSemantic(item) : item.businessObject),
     source: item.source?.id || item.businessObject.sourceRef?.id || null,
     target: item.target?.id || item.businessObject.targetRef?.id || null,
   })).sort((a: any, b: any) => a.id.localeCompare(b.id));
@@ -85,7 +87,7 @@ function normalized(modeler: any, statuses: Map<string, string>, kind: DiagramKi
     type: kind === 'cmmn' ? cmmnDefinition(item)?.$type || item.businessObject.$type : item.businessObject.$type,
     name: architecturalName(item.businessObject) || architecturalName(cmmnDefinition(item)) || null,
     label: item.businessObject.name || cmmnDefinition(item)?.name || '',
-    status: statuses.get(item.id) || 'open',
+    status: statuses.get(item.id) || implementationStatus(kind === 'cmmn' ? cmmnSemantic(item) : item.businessObject),
   })).sort((a: any, b: any) => a.id.localeCompare(b.id));
   return { nodes, flows };
 }
@@ -109,6 +111,7 @@ export async function createDiagramAdapter(path: string, container: HTMLElement,
       isComposable: (element) => ['bpmn:CallActivity', 'bpmn:SubProcess'].includes(commonType(element)),
       diagramName: () => null,
       elementName: (element) => architecturalName(element?.businessObject),
+      elementStatus: (element) => implementationStatus(element?.businessObject),
       updateId: (element, id) => modeler.get('modeling').updateProperties(element, { id }),
       updateLabel: (element, name) => modeler.get('modeling').updateProperties(element, { name }),
       updateName: (element, name) => {
@@ -118,6 +121,7 @@ export async function createDiagramAdapter(path: string, container: HTMLElement,
           ...(reusable ? { calledElement: resolveBpmnElementName(name, { diagramPath: path, reusable: true }) } : {}),
         });
       },
+      updateStatus: (element, status) => modeler.get('modeling').updateProperties(element, { implementationStatus: normalizeNodeStatus(status) === 'open' ? undefined : normalizeNodeStatus(status) }),
       normalizedElements: (statuses) => normalized(modeler, statuses, kind),
     };
   }
@@ -144,9 +148,11 @@ export async function createDiagramAdapter(path: string, container: HTMLElement,
     isComposable: (element) => cmmnDefinition(element)?.$type === 'cmmn:ProcessTask',
     diagramName: (diagramPath) => cmmnPackageName(modeler, diagramPath),
     elementName: (element) => architecturalName(cmmnSemantic(element)) || architecturalName(cmmnDefinition(element)),
+    elementStatus: (element) => implementationStatus(cmmnSemantic(element)),
     updateId: (element, id) => modeler.get('modeling').updateProperties(element, { id }),
     updateLabel: (element, name) => updateCmmnProperties(modeler, element, { name }),
     updateName: (element, name) => updateCmmnProperties(modeler, element, { architecturalName: name }),
+    updateStatus: (element, status) => updateCmmnProperties(modeler, element, { implementationStatus: normalizeNodeStatus(status) === 'open' ? undefined : normalizeNodeStatus(status) }),
     normalizedElements: (statuses) => normalized(modeler, statuses, kind),
   };
 }

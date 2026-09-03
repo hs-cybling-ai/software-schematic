@@ -1,11 +1,21 @@
 import { describe, expect, it, vi } from 'vitest';
-import { architecturalName, cmmnFolderForPackageName, cmmnPathForPackageName, collisionKey, compositionBreadcrumbs, compositionFolderForQualifiedName, compositionIdentity, compositionPathFor, compositionSlug, diagramKind, diagramPathForQualifiedName, documentationPath, isRootDiagram, NODE_STATUSES, normalizeCompositionPath, normalizeNodeStatus, owningPackageName, packageNameForCmmnPath, projectDocumentTitle, qualifiedMemberName, qualifiedNameForCompositionFolder, qualifiedProcessName, qualifiedSymbolFor, resolveBpmnElementName, resolveCmmnElementName, RevisionQueue, selectProjectAnchor, setArchitecturalName, validateCmmnElementName, validateElementName, validateMemberName, validatePackageName, validateProcessName, validateQualifiedProcessName } from '../src/core.js';
+import { architecturalName, cmmnFolderForPackageName, cmmnPathForPackageName, collisionKey, compositionBreadcrumbs, compositionFolderForQualifiedName, compositionIdentity, compositionPathFor, compositionSlug, diagramKind, diagramPathForQualifiedName, documentationPath, implementationStatus, isRootDiagram, NODE_STATUSES, normalizeCompositionPath, normalizeNodeStatus, owningPackageName, packageNameForCmmnPath, projectDocumentTitle, qualifiedMemberName, qualifiedNameForCompositionFolder, qualifiedProcessName, qualifiedSymbolFor, resolveBpmnElementName, resolveCmmnElementName, RevisionQueue, selectProjectAnchor, setArchitecturalName, validateCmmnElementName, validateElementName, validateMemberName, validatePackageName, validateProcessName, validateQualifiedProcessName } from '../src/core.js';
 
 describe('documentation paths', () => {
   it('maps diagrams and elements to deterministic Markdown', () => {
     expect(documentationPath('main.cmmn')).toBe('main.md');
     expect(documentationPath('order/main.bpmn', 'Task_1')).toBe('order/docs/Task_1.md');
     expect(documentationPath('cybling/sdk/main.cmmn', 'PlanItem_1')).toBe('cybling/sdk/docs/PlanItem_1.md');
+  });
+});
+
+describe('persisted implementation status', () => {
+  it('reads moddle and raw XML attributes and normalizes invalid or absent values', () => {
+    expect(implementationStatus({ implementationStatus: 'new' })).toBe('new');
+    expect(implementationStatus({ $attrs: { 'ssw:implementationStatus': 'modify' } })).toBe('modify');
+    expect(implementationStatus({ implementationStatus: 'locked' })).toBe('locked');
+    expect(implementationStatus({ implementationStatus: 'invalid' })).toBe('open');
+    expect(implementationStatus({})).toBe('open');
   });
 });
 
@@ -118,11 +128,11 @@ describe('architectural names', () => {
 describe('RevisionQueue', () => {
   it('serializes writes and only reports the latest revision saved', async () => {
     const states = [];
-    const writer = vi.fn(async () => {});
-    const queue = new RevisionQueue(writer, (state) => states.push(state));
+    const writer = vi.fn(async () => ({ graphRefresh: { status: 'updated', activeRevision: 'new' } }));
+    const queue = new RevisionQueue(writer, (state, detail) => states.push([state, detail]));
     await Promise.all([queue.enqueue('main.md', 'one'), queue.enqueue('main.md', 'two')]);
     expect(writer.mock.calls.map((call) => call.slice(1))).toEqual([['one', 1], ['two', 2]]);
-    expect(states.at(-1)).toBe('saved');
+    expect(states.at(-1)).toEqual(['saved', { graphRefresh: { status: 'updated', activeRevision: 'new' } }]);
   });
   it('allows lifecycle cleanup to await the latest path write', async () => {
     let release;

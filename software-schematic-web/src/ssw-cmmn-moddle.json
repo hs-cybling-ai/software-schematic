@@ -8,7 +8,8 @@
       "name": "NamedCmmnElement",
       "extends": ["cmmn:CMMNElement"],
       "properties": [
-        { "name": "architecturalName", "isAttr": true, "type": "String" }
+        { "name": "architecturalName", "isAttr": true, "type": "String" },
+        { "name": "implementationStatus", "isAttr": true, "type": "String" }
       ]
     },
     {

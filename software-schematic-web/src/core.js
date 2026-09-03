@@ -9,6 +9,7 @@ export function normalizeCompositionPath(value) {
 export const ARCHITECTURAL_NAME_ATTRIBUTE = 'architecturalName';
 export const DIAGRAM_PROCESS_ATTRIBUTE = 'processName';
 export const DIAGRAM_PACKAGE_ATTRIBUTE = 'packageName';
+export const IMPLEMENTATION_STATUS_ATTRIBUTE = 'implementationStatus';
 
 const LOWER_CAMEL = /^[a-z][A-Za-z0-9]*$/;
 const UPPER_CAMEL = /^[A-Z][A-Za-z0-9]*$/;
@@ -250,6 +251,11 @@ export function normalizeNodeStatus(status) {
   return Object.hasOwn(NODE_STATUSES, status) ? status : 'open';
 }
 
+export function implementationStatus(businessObject) {
+  return normalizeNodeStatus(businessObject?.[IMPLEMENTATION_STATUS_ATTRIBUTE]
+    || businessObject?.$attrs?.['ssw:implementationStatus']);
+}
+
 export function projectDocumentTitle(projectName) {
   const name = typeof projectName === 'string' ? projectName.trim() : '';
   return name ? `Software Schematic - ${name}` : 'Software Schematic';
@@ -277,8 +283,9 @@ export class RevisionQueue {
     this.revisions.set(path, revision);
     this.onState('pending');
     const prior = this.chains.get(path) || Promise.resolve();
-    const next = prior.catch(() => {}).then(() => this.writer(path, content, revision)).then(() => {
-      if (this.revisions.get(path) === revision) this.onState('saved');
+    const next = prior.catch(() => {}).then(() => this.writer(path, content, revision)).then((result) => {
+      if (this.revisions.get(path) === revision) this.onState('saved', result);
+      return result;
     }).catch((error) => {
       if (this.revisions.get(path) === revision) this.onState('failed', error);
       throw error;

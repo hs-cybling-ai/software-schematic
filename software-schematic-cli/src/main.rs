@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use software_schematic_cli::{
-    Result, assistant_auth_login, assistant_auth_logout, assistant_auth_status, init_project, serve,
+    Result, assistant_auth_login, assistant_auth_logout, assistant_auth_status, init_project,
+    schematic_mcp::serve_mcp, serve, update_project,
 };
 use std::path::PathBuf;
 
@@ -31,6 +32,16 @@ enum Command {
         project: PathBuf,
         #[command(subcommand)]
         command: AuthCommand,
+    },
+    /// Serve the compiled project schematic over MCP stdio.
+    Mcp {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Refresh the pinned runtime and project-local Codex integration.
+    Update {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
     },
 }
 
@@ -66,6 +77,15 @@ async fn main() -> Result<()> {
             AuthCommand::Status => assistant_auth_status(project)?,
             AuthCommand::Logout => assistant_auth_logout(project)?,
         },
+        Command::Mcp { project } => serve_mcp(project).await?,
+        Command::Update { project } => {
+            let layout = update_project(project)?;
+            println!(
+                "Software Schematic {} updated in {}",
+                env!("CARGO_PKG_VERSION"),
+                layout.project.display()
+            );
+        }
     }
     Ok(())
 }

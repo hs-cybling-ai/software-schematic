@@ -4,7 +4,7 @@ Software Schematic exposes the same proposal workflow from two magic actions: th
 
 ## Configuration
 
-The recommended local setup reuses an official Codex or Claude Code account login:
+The local setup automatically uses Codex when its CLI is installed, otherwise Claude Code. An explicit project selection can also be saved with:
 
 ```sh
 ./ssw auth login
@@ -15,7 +15,7 @@ Codex is preferred when both CLIs are installed. Select Claude explicitly with `
 
 Local providers run ephemerally with tools disabled, a read-only sandbox or plan permission mode, no conversation persistence, and the same strict operation-plan schema used by the API provider. SSW remains solely responsible for validating, previewing, approving, and applying changes.
 
-The deterministic local provider is the default and is intended for testing:
+The deterministic local provider is available only when explicitly selected and is intended for testing:
 
 ```sh
 SSW_ASSISTANT_PROVIDER=fake ./ssw
@@ -35,7 +35,7 @@ Requests contain a versioned semantic graph of nodes and sequence flows, stable 
 
 ## Review, application, and recovery
 
-Provider output is an untrusted declarative plan. Supported operations replace a node type, rename a node, set a composition link, create/open a composition, add flow nodes, connect sequence flows, and replace diagram or node Markdown. Code, shell commands, raw patches, arbitrary XML, unknown operations, escaped paths, duplicate IDs, stale revisions, and changes to locked nodes are rejected.
+Provider output is an untrusted declarative plan. Supported operations replace a node type, rename a node, set an implementation status, set a composition link, create/open a composition, add flow nodes, connect sequence flows, and replace diagram or node Markdown. Code, shell commands, raw patches, arbitrary XML, unknown operations, escaped paths, duplicate IDs, stale revisions, and changes to locked nodes are rejected.
 
 No mutation occurs during generation or preview. The user must approve the complete grouped preview. The editor validates again immediately before application, captures affected BPMN and Markdown content, applies changes through `bpmn-js` and confined file endpoints, and restores captured state if an operation fails. Successful changes retain normal per-diagram undo and expose **Revert assistant change** for the last coordinated proposal.
 

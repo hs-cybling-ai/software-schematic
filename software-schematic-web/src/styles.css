@@ -92,6 +92,8 @@ button { color: inherit; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
 .save-status.pending .status-dot { background: var(--warning); animation: pulse 1s infinite; }
 .save-status.failed { color: #ff9baa; }.save-status.failed .status-dot { background: var(--danger); }
+.save-status.stale, .save-status.refresh-failed { color: var(--warning); }
+.save-status.stale .status-dot, .save-status.refresh-failed .status-dot { background: var(--warning); }
 .markdown-body { color: #cbd5e5; font-size: 14px; line-height: 1.7; }
 .markdown-body h1, .markdown-body h2, .markdown-body h3 { color: var(--text); line-height: 1.25; letter-spacing: -.02em; }
 .markdown-body h1 { font-size: 22px; }.markdown-body h2 { margin-top: 28px; font-size: 17px; }

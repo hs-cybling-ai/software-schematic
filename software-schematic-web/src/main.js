@@ -26,7 +26,7 @@ let activeTab = null;
 let selectedElement = null;
 let editingMarkdown = false;
 let markdownTimer = null;
-let assistantProvider = 'fake';
+let assistantProvider = null;
 let projectAnchorPath = 'main.cmmn';
 const queue = new RevisionQueue(writeFile, setSaveState);
 
@@ -142,11 +142,36 @@ function writeFile(path, content, revision) {
   return api('/api/file', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path, content, revision }) });
 }
 
-function setSaveState(state, error) {
+function setSaveState(state, detail) {
   const control = $('#save-status');
-  control.className = `save-status ${state}`;
-  control.lastElementChild.textContent = state === 'pending' ? 'Saving…' : state === 'failed' ? 'Save failed' : 'Saved';
-  if (error) showToast(error.message);
+  let displayState = state;
+  let label = state === 'pending' ? 'Saving…' : state === 'failed' ? 'Save failed' : 'Saved';
+  if (state === 'saved' && detail?.graphRefresh) {
+    const refresh = detail.graphRefresh;
+    if (refresh.status === 'updated' || refresh.status === 'unchanged') {
+      label = refresh.diagnostic
+        ? 'Saved; graph updated with warnings'
+        : refresh.status === 'updated' ? 'Saved; graph updated' : 'Saved; graph current';
+      control.title = refresh.diagnostic || (refresh.activeRevision ? `Graph revision ${refresh.activeRevision}` : label);
+      if (refresh.diagnostic) showToast(`Graph rebuilt from main.cmmn; ${refresh.diagnostic}`);
+    } else if (refresh.status === 'notRunning') {
+      displayState = 'stale';
+      label = 'Saved; MCP not running';
+      control.title = refresh.diagnostic || label;
+    } else {
+      displayState = 'refresh-failed';
+      label = 'Saved; graph update failed';
+      control.title = refresh.diagnostic || label;
+      if (refresh.diagnostic) showToast(`Saved; graph update failed: ${refresh.diagnostic}`);
+    }
+  } else if (state === 'failed' && detail) {
+    control.title = detail.message || 'Save failed';
+    showToast(detail.message);
+  } else if (state !== 'saved') {
+    control.removeAttribute('title');
+  }
+  control.className = `save-status ${displayState}`;
+  control.lastElementChild.textContent = label;
 }
 
 function showToast(message) {
@@ -167,7 +192,7 @@ function isStatusEligible(element, tab = activeTab) {
 }
 
 function statusFor(tab, element) {
-  return normalizeNodeStatus(tab?.nodeStatuses.get(element?.id));
+  return normalizeNodeStatus(tab?.nodeStatuses.get(element?.id) || tab?.adapter?.elementStatus(element));
 }
 
 function applyNodeStatus(tab, element) {
@@ -237,6 +262,11 @@ async function openDiagram(path, originPath = null) {
   tabButton.addEventListener('click', () => activateTab(tab));
   tabElement.append(tabButton);
   const tab = { path, adapter, modeler, container, tabElement, tabButton, nodeStatuses: new Map(), diagramTimer: null, originPath };
+  modeler.get('elementRegistry').getAll().forEach((element) => {
+    if (!adapter.isStatusEligible(element)) return;
+    const status = normalizeNodeStatus(adapter.elementStatus(element));
+    if (status !== 'open') tab.nodeStatuses.set(element.id, status);
+  });
   if (!isRootDiagram(path)) {
     const closeButton = document.createElement('button');
     closeButton.className = 'tab-close';
@@ -469,7 +499,10 @@ function openAssistant({ scope, elementId, invoker }) {
   $('#assistant-reject').classList.add('hidden');
   $('#assistant-prompt').value = '';
   $('#assistant-scope').textContent = scope === 'node' ? `Node: ${businessLabel(element)} in ${compositionIdentity(activeTab.path).displayPath}` : `Complete diagram: ${compositionIdentity(activeTab.path).displayPath}`;
-  $('#assistant-disclosure').textContent = `Provider: ${assistantProvider}. It receives active diagram structure and relevant Markdown. No credential is sent to the browser.`;
+  $('#assistant-disclosure').textContent = assistantProvider
+    ? `Provider: ${assistantProvider}. It receives active diagram structure and relevant Markdown. No credential is sent to the browser.`
+    : 'Assistant not configured. Run ./ssw auth login in this project, then restart SSW.';
+  $('#assistant-submit').disabled = !assistantProvider;
   $('#assistant-modal').classList.remove('hidden');
   $('#assistant-prompt').focus();
 }
@@ -558,6 +591,13 @@ async function applyAssistantProposal(proposal) {
       if (operation.type === 'replace_node_type') tab.modeler.get('bpmnReplace').replaceElement(registry.get(operation.nodeId), { type: operation.bpmnType });
       else if (operation.type === 'update_node_label') tab.adapter.updateLabel(registry.get(operation.nodeId), operation.label);
       else if (operation.type === 'update_node_name') tab.adapter.updateName(registry.get(operation.nodeId), operation.name);
+      else if (operation.type === 'set_node_status') {
+        const element = registry.get(operation.nodeId);
+        tab.adapter.updateStatus(element, operation.status);
+        if (operation.status === 'open') tab.nodeStatuses.delete(operation.nodeId);
+        else tab.nodeStatuses.set(operation.nodeId, operation.status);
+        applyNodeStatus(tab, element);
+      }
       else if (operation.type === 'set_process_reference') tab.adapter.updateName(registry.get(operation.nodeId), operation.qualifiedName);
       else if (operation.type === 'rename_process') {
         await api('/api/process-renames', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ old_qualified_name: operation.oldQualifiedName, new_qualified_name: operation.newQualifiedName }) });
@@ -705,6 +745,7 @@ $('#node-status').addEventListener('change', (event) => {
   const status = normalizeNodeStatus(event.target.value);
   if (status === 'open') activeTab.nodeStatuses.delete(selectedElement.id);
   else activeTab.nodeStatuses.set(selectedElement.id, status);
+  activeTab.adapter.updateStatus(selectedElement, status);
   $('#node-status-meaning').textContent = NODE_STATUSES[status].meaning;
   applyNodeStatus(activeTab, selectedElement);
 });
@@ -860,7 +901,7 @@ async function initialize() {
   try {
     const metadata = await api('/api/project');
     document.title = projectDocumentTitle(metadata?.name);
-    assistantProvider = metadata?.assistant_provider || 'fake';
+    assistantProvider = metadata?.assistant_provider || null;
   } catch {}
   projectAnchorPath = selectProjectAnchor(await api('/api/diagrams'));
   await openDiagram(projectAnchorPath);

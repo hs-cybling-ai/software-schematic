@@ -9,6 +9,12 @@ const main = readFileSync(resolve(root, 'src/main.js'), 'utf8');
 const adapters = readFileSync(resolve(root, 'src/diagram-adapters.ts'), 'utf8');
 
 describe('browser workspace contract', () => {
+  it('uses the defined status renderer when applying assistant status operations', () => {
+    expect(main).toContain("operation.type === 'set_node_status'");
+    expect(main).toContain('applyNodeStatus(tab, element)');
+    expect(main).not.toContain('applyStatusMarker(');
+  });
+
   it('contains retained diagram, metadata, documentation, and autosave surfaces', () => {
     for (const id of ['tabs', 'breadcrumbs', 'canvases', 'element-id', 'element-label', 'element-type', 'element-name', 'node-status', 'markdown-rendered', 'markdown-source', 'save-status']) {
       expect(html).toContain(`id="${id}"`);
@@ -29,6 +35,8 @@ describe('browser workspace contract', () => {
     expect(css).toContain(':focus-visible');
     expect(css).toContain('.save-status.pending');
     expect(css).toContain('.save-status.failed');
+    expect(css).toContain('.save-status.stale');
+    expect(css).toContain('.save-status.refresh-failed');
     expect(css).toContain('.djs-direct-editing-content');
     expect(css).toContain('color: #111827 !important');
   });
@@ -78,6 +86,9 @@ describe('browser workspace contract', () => {
     expect(main).toContain('tab.adapter.destroy()');
     expect(main).toContain('tab.nodeStatuses.clear()');
     expect(main).toContain("projectAnchorPath = selectProjectAnchor(await api('/api/diagrams'))");
+    expect(main).toContain("Saved; graph updated");
+    expect(main).toContain("Saved; MCP not running");
+    expect(main).toContain("Saved; graph update failed");
     expect(main).toContain('await openDiagram(projectAnchorPath)');
   });
 
@@ -106,13 +117,15 @@ describe('browser workspace contract', () => {
     expect(main).toContain("await renderMarkdown($('#markdown-source').value)");
   });
 
-  it('provides transient accessible node status controls and colors', () => {
+  it('persists accessible node status controls through the modeler command stack', () => {
     expect(html).toContain('id="node-status"');
     expect(html).toContain('id="node-status-meaning"');
     for (const status of ['open', 'new', 'locked', 'modify']) {
       expect(css).toContain(`.node-status-${status}`);
     }
     expect(main).toContain('activeTab.nodeStatuses.set(selectedElement.id, status)');
+    expect(main).toContain('activeTab.adapter.updateStatus(selectedElement, status)');
+    expect(adapters).toContain('implementationStatus: normalizeNodeStatus(status)');
     expect(main).toContain("gfx?.setAttribute('aria-label'");
     expect(main).not.toContain('!element.waypoints && !element.labelTarget');
   });

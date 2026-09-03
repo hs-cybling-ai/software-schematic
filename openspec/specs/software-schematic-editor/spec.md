@@ -3,9 +3,7 @@
 ## Purpose
 
 Provide a polished, self-contained browser workspace for editing, documenting, and automatically saving CMMN business anchors and BPMN compositions.
-
 ## Requirements
-
 ### Requirement: Two-column schematic workspace
 The web application SHALL present a polished, responsive diagram column on the left and a metadata/documentation column on the right, with the diagram column occupying the larger share of the available workspace.
 
@@ -165,23 +163,27 @@ The Markdown panel SHALL show rendered Markdown in read mode and editable Markdo
 - **THEN** the control announces `Edit Markdown` in read mode or `Read Markdown` in edit mode
 
 ### Requirement: Implementation Status
-The SSW editor SHALL let a user assign exactly one Implementation Status of `new`, `locked`, `modify`, or `open` to each eligible BPMN or CMMN node or edge in an open tab. The statuses SHALL mean, respectively, that an assistant is being asked to create the represented work/content, must not change the element, is allowed and expected to change the element, or receives no hint. An element with no assigned or recognized status SHALL be treated as `open`. Status SHALL remain an authoring hint and SHALL NOT prevent manual editing. Until persistence is implemented, status SHALL be client-side state scoped to the lifetime of the open tab and SHALL NOT be written to diagram XML or Markdown.
+The SSW editor SHALL let a user assign exactly one Implementation Status of `new`, `locked`, `modify`, or `open` to each eligible BPMN or CMMN node or edge. The statuses SHALL mean, respectively, that development must create the represented work/content, must not change the element, is allowed and expected to change the element, or is context-only and outside implementation scope. An element with no assigned or recognized status SHALL be treated as `open`. Status SHALL guide agents and SHALL NOT prevent manual editing. The editor SHALL persist recognized non-default status as SSW diagram XML metadata, restore it when the diagram reopens, and include status changes in undo/redo, dirty state, and automatic save. Green `new` and orange `modify` elements SHALL be the only eligible development targets; gray `locked` and white `open` elements SHALL remain readable context.
 
 #### Scenario: User selects an eligible element
-- **WHEN** the user selects a BPMN node or edge in the active editor
-- **THEN** the selected-item metadata displays its current status and a textual explanation of the corresponding LLM hint
+- **WHEN** the user selects a BPMN or CMMN node or edge in the active editor
+- **THEN** the selected-item metadata displays its current status and a textual explanation of its development-scope meaning
 
-#### Scenario: User changes node status
-- **WHEN** the user changes a selected node from `open` to `locked`, `modify`, or `new`
-- **THEN** the application updates that node's client-side status immediately without preventing manual edits or scheduling BPMN or Markdown persistence
+#### Scenario: User marks development scope
+- **WHEN** the user changes an eligible element from `open` to `new` or `modify`
+- **THEN** the model records the status through its command stack, renders it green or orange, marks the diagram dirty, and automatically persists it in diagram XML
+
+#### Scenario: Persisted status is reopened
+- **WHEN** a saved diagram containing `new`, `modify`, or `locked` metadata is closed and reopened
+- **THEN** each eligible element restores the same status, color, and textual meaning
+
+#### Scenario: User clears development scope
+- **WHEN** the user changes an element from `new` or `modify` to `open`
+- **THEN** the saved model removes or normalizes the default status metadata and the element is no longer eligible for development scope
 
 #### Scenario: Unsupported element is selected
-- **WHEN** the current selection is a label, diagram root, or no element
+- **WHEN** the current selection is a label, unsupported diagram root, or no element
 - **THEN** the status control is unavailable and no element status changes
-
-#### Scenario: Tab is reopened before persistence exists
-- **WHEN** a tab containing client-side node statuses is closed and its diagram is opened again
-- **THEN** its nodes default to `open` because GrafeoDB persistence is outside this change
 
 ### Requirement: Status color and non-color presentation
 The editor SHALL render the primary fill of an eligible node green for `new`, grey for `locked`, orange for `modify`, and white for `open`, while preserving BPMN outlines, icons, labels, selection cues, and type semantics. The editor SHALL also expose the status name and LLM meaning in text and accessible labeling so status is not communicated by color alone.
@@ -270,3 +272,19 @@ When a BPMN design is opened from a CMMN Process Task, the editor SHALL retain t
 #### Scenario: Linked BPMN tab opens
 - **WHEN** a user opens `cybling.sdk.Birth` from a Process Task in `cybling/main.cmmn`
 - **THEN** both tabs remain available and the user can return directly to the CMMN business context
+
+### Requirement: Document and graph save status
+The web application SHALL distinguish durable document persistence from derived graph refresh. After a successful diagram or connected Markdown save, it SHALL report whether the running project MCP published a new revision, was not running, or retained its prior revision because refresh failed. A refresh failure SHALL NOT be represented as a document-save failure and SHALL NOT roll back the authored file.
+
+#### Scenario: Save and graph refresh succeed
+- **WHEN** a document saves and the running MCP publishes the replacement graph
+- **THEN** the web application reports that the document is saved and identifies the updated graph revision
+
+#### Scenario: Save succeeds without MCP
+- **WHEN** the document saves but no matching MCP process is running
+- **THEN** the web application reports the document as saved and the graph as not refreshed
+
+#### Scenario: Save succeeds but graph rebuild fails
+- **WHEN** the document saves but the MCP retains its prior graph after a rebuild diagnostic
+- **THEN** the web application reports the document as saved, the graph update as failed, and an actionable diagnostic
+
