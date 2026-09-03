@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, copyFileSync, chmodSync, readdirSync, utimesSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, copyFileSync, chmodSync, readdirSync, utimesSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -96,7 +96,7 @@ function packageTarget(options) {
     const temporaryArchive = join(temporary, name);
     if (config.archive === 'zip') run('tar', ['-a', '-cf', name, directoryName], { cwd: temporary });
     else run('tar', ['-czf', name, directoryName], { cwd: temporary });
-    renameSync(temporaryArchive, archive);
+    copyFileSync(temporaryArchive, archive);
     const record = { ...metadata, target, executable: config.executable, archive: name, sha256: sha256(archive) };
     writeFileSync(targetMetadata, `${JSON.stringify(record, null, 2)}\n`);
     process.stdout.write(`${JSON.stringify(record)}\n`);
