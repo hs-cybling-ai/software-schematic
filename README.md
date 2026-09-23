@@ -23,8 +23,9 @@ ssw / ssw.cmd        project-local macOS and Windows launchers
 
 The installed application runs on an available loopback port. Browser code,
 styles, fonts, diagram modelers, templates, and embeddings are local; no CDN or
-package registry is needed at runtime. ONNX Runtime is required only for MCP
-embeddings, not for the diagram editor.
+package registry is needed at runtime. ONNX Runtime is loaded only by the
+asynchronous Markdown embedding worker or explicit backfill command; graph and
+MCP startup do not load it.
 
 ## Supported targets
 
@@ -33,9 +34,9 @@ embeddings, not for the diagram editor.
 
 The installed executable does not require Rust, Node.js, or npm. Building from
 source requires a current stable Rust toolchain, Node.js 24 or newer, and npm.
-On macOS, install ONNX Runtime with `brew install onnxruntime` to run MCP tests
-and the local MCP server. Windows users provide `onnxruntime.dll` beside the
-installed `.ss\bin\ss.exe` for MCP use.
+On macOS, install ONNX Runtime with `brew install onnxruntime` to generate
+Markdown embeddings. Windows users provide `onnxruntime.dll` beside the
+installed `.ss\bin\ss.exe` for embedding generation.
 
 ## Download a release
 
@@ -81,8 +82,8 @@ Windows SmartScreen may therefore request confirmation before first use.
 Checksums and GitHub attestations verify integrity and build provenance but do
 not replace platform code signing.
 
-After `ss init`, follow the platform wrapper instructions below. MCP embeddings
-still require native ONNX Runtime as described under Supported targets. Build
+After `ss init`, follow the platform wrapper instructions below. Generating or
+backfilling embeddings requires native ONNX Runtime as described under Supported targets. Build
 from source if no archive matches the system or the release needs to be audited
 locally.
 
@@ -151,9 +152,12 @@ business services, and links to BPMN designs. Named CMMN Process Tasks open
 reusable BPMN compositions. Every supported node or edge can carry a stable
 ID, label, architectural Name, Implementation Status, and ID-bound Markdown.
 
-The browser editor saves complete CMMN/BPMN XML and Markdown automatically. A
-successful save asks a running project MCP to rebuild the complete graph rooted
-at `main.cmmn`. Unreachable diagrams are excluded, and stale connections to
+The browser editor saves complete CMMN/BPMN XML and Markdown automatically.
+Markdown vectors are stored in a reserved generated header hidden by the editor;
+`./ssw embeddings` backfills missing or stale headers. A
+successful save queues a path-aware background refresh with a running project
+MCP, which atomically publishes a complete graph rooted at `main.cmmn` when the
+refresh is ready. Unreachable diagrams are excluded, and stale connections to
 deleted elements are skipped with warnings rather than blocking the refresh.
 
 See [AI diagram assistance](docs/ai-diagram-assistant.md),

@@ -26,6 +26,7 @@ let activeTab = null;
 let selectedElement = null;
 let editingMarkdown = false;
 let markdownTimer = null;
+let graphRefreshTimer = null;
 let assistantProvider = null;
 let projectAnchorPath = 'main.cmmn';
 const queue = new RevisionQueue(writeFile, setSaveState);
@@ -142,13 +143,38 @@ function writeFile(path, content, revision) {
   return api('/api/file', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path, content, revision }) });
 }
 
+async function pollGraphRefresh() {
+  graphRefreshTimer = null;
+  try {
+    const [graphRefresh, embedding] = await Promise.all([
+      api('/api/graph-refresh'),
+      api('/api/embedding-status'),
+    ]);
+    setSaveState('saved', { graphRefresh, embedding });
+  } catch (error) {
+    setSaveState('saved', { graphRefresh: { status: 'notRunning', diagnostic: error.message } });
+  }
+}
+
+function scheduleGraphRefreshPoll() {
+  if (graphRefreshTimer) return;
+  graphRefreshTimer = globalThis.setTimeout(pollGraphRefresh, 400);
+}
+
 function setSaveState(state, detail) {
   const control = $('#save-status');
   let displayState = state;
   let label = state === 'pending' ? 'Saving…' : state === 'failed' ? 'Save failed' : 'Saved';
   if (state === 'saved' && detail?.graphRefresh) {
     const refresh = detail.graphRefresh;
-    if (refresh.status === 'updated' || refresh.status === 'unchanged') {
+    if (refresh.status === 'queued' || refresh.status === 'processing') {
+      displayState = 'pending';
+      label = refresh.status === 'queued' ? 'Saved; graph queued' : 'Saved; graph updating…';
+      control.title = refresh.affectedPaths?.length
+        ? `Graph update: ${refresh.affectedPaths.join(', ')}`
+        : label;
+      scheduleGraphRefreshPoll();
+    } else if (refresh.status === 'updated' || refresh.status === 'unchanged') {
       label = refresh.diagnostic
         ? 'Saved; graph updated with warnings'
         : refresh.status === 'updated' ? 'Saved; graph updated' : 'Saved; graph current';
@@ -163,6 +189,20 @@ function setSaveState(state, detail) {
       label = 'Saved; graph update failed';
       control.title = refresh.diagnostic || label;
       if (refresh.diagnostic) showToast(`Saved; graph update failed: ${refresh.diagnostic}`);
+    }
+    const embedding = detail.embedding;
+    if (embedding?.status === 'queued' || embedding?.status === 'processing') {
+      displayState = 'pending';
+      label = embedding.status === 'queued' ? 'Saved; embeddings queued' : 'Saved; embedding…';
+      control.title = embedding.path ? `Embedding ${embedding.path}` : label;
+      scheduleGraphRefreshPoll();
+    } else if (embedding?.status === 'failed') {
+      displayState = 'refresh-failed';
+      label = 'Saved; vector search degraded';
+      control.title = embedding.diagnostic || label;
+    } else if (embedding?.status === 'stale') {
+      displayState = 'stale';
+      label = 'Saved; vectors stale';
     }
   } else if (state === 'failed' && detail) {
     control.title = detail.message || 'Save failed';

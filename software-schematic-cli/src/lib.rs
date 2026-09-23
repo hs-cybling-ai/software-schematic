@@ -7,14 +7,19 @@ use axum::{
     routing::{get, post},
 };
 pub mod assistant;
+pub mod embedding_document;
 pub mod schematic_graph;
 pub mod schematic_mcp;
 use include_dir::{Dir, include_dir};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use thiserror::Error;
 use tower_http::services::{ServeDir, ServeFile};
@@ -135,8 +140,8 @@ const STARTER_MD: &str = include_str!("../assets/starter.md");
 const PROJECT_LICENSE: &str = include_str!("../../LICENSE");
 const PROJECT_NOTICE: &str = include_str!("../../NOTICE");
 const THIRD_PARTY_NOTICES: &str = include_str!("../../THIRD_PARTY_NOTICES.md");
-const MAC_WRAPPER: &str = "#!/bin/sh\nset -eu\nSCRIPT_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\ncase \"${1:-}\" in\n  auth) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" auth --project \"$SCRIPT_DIR\" \"$@\" ;;\n  mcp) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" mcp --project \"$SCRIPT_DIR\" \"$@\" ;;\n  update) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" update --project \"$SCRIPT_DIR\" \"$@\" ;;\nesac\nexec \"$SCRIPT_DIR/.ss/bin/ss\" serve --project \"$SCRIPT_DIR\" \"$@\"\n";
-const WINDOWS_WRAPPER: &str = "@echo off\r\nsetlocal\r\nif \"%~1\"==\"auth\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" auth --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"mcp\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" mcp --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"update\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" update --project \"%~dp0\" %*\r\n) else (\r\n  \"%~dp0.ss\\bin\\ss.exe\" serve --project \"%~dp0\" %*\r\n)\r\n";
+const MAC_WRAPPER: &str = "#!/bin/sh\nset -eu\nSCRIPT_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\ncase \"${1:-}\" in\n  auth) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" auth --project \"$SCRIPT_DIR\" \"$@\" ;;\n  embeddings) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" embeddings --project \"$SCRIPT_DIR\" \"$@\" ;;\n  mcp) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" mcp --project \"$SCRIPT_DIR\" \"$@\" ;;\n  update) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" update --project \"$SCRIPT_DIR\" \"$@\" ;;\nesac\nexec \"$SCRIPT_DIR/.ss/bin/ss\" serve --project \"$SCRIPT_DIR\" \"$@\"\n";
+const WINDOWS_WRAPPER: &str = "@echo off\r\nsetlocal\r\nif \"%~1\"==\"auth\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" auth --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"embeddings\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" embeddings --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"mcp\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" mcp --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"update\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" update --project \"%~dp0\" %*\r\n) else (\r\n  \"%~dp0.ss\\bin\\ss.exe\" serve --project \"%~dp0\" %*\r\n)\r\n";
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -515,6 +520,10 @@ pub struct AppState {
     project: Arc<PathBuf>,
     schematics: Arc<PathBuf>,
     assistant_slots: Arc<tokio::sync::Semaphore>,
+    embedding_jobs: Arc<tokio::sync::Mutex<BTreeMap<String, u64>>>,
+    embedding_generation: Arc<AtomicU64>,
+    embedding_slots: Arc<tokio::sync::Semaphore>,
+    embedding_status: Arc<tokio::sync::RwLock<EmbeddingOutcome>>,
 }
 
 impl AppState {
@@ -525,6 +534,10 @@ impl AppState {
             project: Arc::new(project),
             schematics: Arc::new(schematics),
             assistant_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            embedding_jobs: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+            embedding_generation: Arc::new(AtomicU64::new(0)),
+            embedding_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            embedding_status: Arc::new(tokio::sync::RwLock::new(EmbeddingOutcome::default())),
         })
     }
 
@@ -596,6 +609,27 @@ struct WriteResponse {
     path: String,
     revision: u64,
     graph_refresh: schematic_mcp::GraphRefreshOutcome,
+    embedding: EmbeddingOutcome,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EmbeddingOutcome {
+    status: String,
+    path: Option<String>,
+    body_hash: Option<String>,
+    diagnostic: Option<String>,
+}
+
+impl Default for EmbeddingOutcome {
+    fn default() -> Self {
+        Self {
+            status: "current".into(),
+            path: None,
+            body_hash: None,
+            diagnostic: None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -649,6 +683,8 @@ pub fn app(state: AppState) -> Router {
         .route("/api/project", get(project_metadata))
         .route("/api/diagrams", get(list_diagrams))
         .route("/api/file", get(read_file).put(write_file))
+        .route("/api/graph-refresh", get(graph_refresh_status))
+        .route("/api/embedding-status", get(embedding_status))
         .route("/api/rename-documentation", post(rename_documentation))
         .route("/api/compositions", post(resolve_composition))
         .route("/api/process-renames", post(rename_process))
@@ -698,6 +734,10 @@ async fn project_metadata(State(state): State<AppState>) -> Result<Json<ProjectM
 
 pub async fn serve(project: PathBuf, open_browser: bool) -> Result<()> {
     let state = AppState::new(project)?;
+    let backfill_state = state.clone();
+    tokio::spawn(async move {
+        let _ = schedule_project_embeddings(&backfill_state).await;
+    });
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let address = listener.local_addr()?;
     let url = format!("http://{address}");
@@ -765,7 +805,12 @@ async fn read_file(
             "only BPMN, CMMN, and Markdown files are readable".into(),
         ));
     }
-    Ok(tokio::fs::read_to_string(path).await?)
+    let content = tokio::fs::read_to_string(path).await?;
+    if query.path.ends_with(".md") {
+        Ok(embedding_document::parse_markdown(&content).body)
+    } else {
+        Ok(content)
+    }
 }
 
 async fn write_file(
@@ -781,16 +826,273 @@ async fn write_file(
             "only BPMN, CMMN, and Markdown files are writable".into(),
         ));
     }
+    let change_kind = if path.exists() {
+        schematic_mcp::DocumentChangeKind::Replaced
+    } else {
+        schematic_mcp::DocumentChangeKind::Created
+    };
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    atomic_write(&path, request.content.as_bytes()).await?;
-    let graph_refresh = schematic_mcp::notify_documents_changed(state.project.as_path()).await;
+    let authored_content = if request.path.ends_with(".md") {
+        embedding_document::parse_markdown(&request.content).body
+    } else {
+        request.content
+    };
+    atomic_write(&path, authored_content.as_bytes()).await?;
+    let embedding = if request.path.ends_with(".md") {
+        schedule_embedding(&state, request.path.clone(), authored_content).await
+    } else {
+        state.embedding_status.read().await.clone()
+    };
+    let graph_refresh = schematic_mcp::notify_documents_changed(
+        state.project.as_path(),
+        &request.path,
+        change_kind,
+    )
+    .await;
     Ok(Json(WriteResponse {
         path: request.path,
         revision: request.revision,
         graph_refresh,
+        embedding,
     }))
+}
+
+async fn graph_refresh_status(
+    State(state): State<AppState>,
+) -> Json<schematic_mcp::GraphRefreshOutcome> {
+    Json(schematic_mcp::graph_refresh_status(state.project.as_path()).await)
+}
+
+async fn embedding_status(State(state): State<AppState>) -> Json<EmbeddingOutcome> {
+    Json(state.embedding_status.read().await.clone())
+}
+
+async fn schedule_embedding(state: &AppState, relative: String, body: String) -> EmbeddingOutcome {
+    if body.trim().is_empty() {
+        state.embedding_jobs.lock().await.remove(&relative);
+        let current = EmbeddingOutcome {
+            status: "current".into(),
+            path: Some(relative),
+            body_hash: Some(embedding_document::body_hash(&body)),
+            diagnostic: None,
+        };
+        *state.embedding_status.write().await = current.clone();
+        return current;
+    }
+    let generation = state.embedding_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    state
+        .embedding_jobs
+        .lock()
+        .await
+        .insert(relative.clone(), generation);
+    let body_hash = embedding_document::body_hash(&body);
+    let queued = EmbeddingOutcome {
+        status: "queued".into(),
+        path: Some(relative.clone()),
+        body_hash: Some(body_hash.clone()),
+        diagnostic: None,
+    };
+    *state.embedding_status.write().await = queued.clone();
+    let worker = state.clone();
+    tokio::spawn(async move {
+        let Ok(_permit) = worker.embedding_slots.clone().acquire_owned().await else {
+            return;
+        };
+        if worker.embedding_jobs.lock().await.get(&relative).copied() != Some(generation) {
+            return;
+        }
+        *worker.embedding_status.write().await = EmbeddingOutcome {
+            status: "processing".into(),
+            path: Some(relative.clone()),
+            body_hash: Some(body_hash.clone()),
+            diagnostic: None,
+        };
+        let project = worker.project.as_ref().clone();
+        let owner = match markdown_owner(worker.schematics.as_path(), &relative) {
+            Ok(value) => value,
+            Err(error) => {
+                *worker.embedding_status.write().await = EmbeddingOutcome {
+                    status: "failed".into(),
+                    path: Some(relative),
+                    body_hash: Some(body_hash),
+                    diagnostic: Some(error.to_string()),
+                };
+                return;
+            }
+        };
+        let body_for_derivation = body.clone();
+        let derived = tokio::task::spawn_blocking(move || {
+            schematic_graph::derive_embedding_envelope(
+                &project,
+                &owner,
+                &body_for_derivation,
+                &schematic_graph::LoadOptions::default(),
+            )
+        })
+        .await;
+        let outcome = match derived {
+            Ok(Ok(envelope)) => {
+                publish_embedding_header(&worker, &relative, generation, &body, &envelope).await
+            }
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(Error::Message(format!("embedding task failed: {error}"))),
+        };
+        match outcome {
+            Ok(true) => {
+                *worker.embedding_status.write().await = EmbeddingOutcome {
+                    status: "current".into(),
+                    path: Some(relative),
+                    body_hash: Some(body_hash),
+                    diagnostic: None,
+                };
+            }
+            Ok(false) => {}
+            Err(error) => {
+                worker.embedding_jobs.lock().await.remove(&relative);
+                *worker.embedding_status.write().await = EmbeddingOutcome {
+                    status: "failed".into(),
+                    path: Some(relative),
+                    body_hash: Some(body_hash),
+                    diagnostic: Some(error.to_string()),
+                };
+            }
+        }
+    });
+    queued
+}
+
+async fn schedule_project_embeddings(state: &AppState) -> Result<usize> {
+    let documents = WalkDir::new(state.schematics.as_path())
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && entry.path().extension().and_then(|value| value.to_str()) == Some("md")
+        })
+        .map(|entry| entry.path().to_path_buf())
+        .collect::<Vec<_>>();
+    let mut scheduled = 0;
+    for path in documents {
+        let physical = tokio::fs::read_to_string(&path).await?;
+        let parsed = embedding_document::parse_markdown(&physical);
+        if parsed.body.trim().is_empty() {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(state.schematics.as_path())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let current = parsed.envelope.as_ref().is_some_and(|envelope| {
+            envelope.body_hash == embedding_document::body_hash(&parsed.body)
+                && envelope.model == schematic_graph::EMBEDDING_MODEL
+                && embedding_document::validate_envelope_shape(envelope).is_ok()
+        });
+        if !current {
+            schedule_embedding(state, relative, parsed.body).await;
+            scheduled += 1;
+        }
+    }
+    Ok(scheduled)
+}
+
+pub async fn backfill_embeddings(project: impl AsRef<Path>) -> Result<usize> {
+    let state = AppState::new(project)?;
+    let scheduled = schedule_project_embeddings(&state).await?;
+    while !state.embedding_jobs.lock().await.is_empty() {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let status = state.embedding_status.read().await.clone();
+    if status.status == "failed" {
+        return Err(Error::Message(
+            status
+                .diagnostic
+                .unwrap_or_else(|| "embedding backfill failed".into()),
+        ));
+    }
+    Ok(scheduled)
+}
+
+async fn publish_embedding_header(
+    state: &AppState,
+    relative: &str,
+    generation: u64,
+    expected_body: &str,
+    envelope: &embedding_document::EmbeddingEnvelope,
+) -> Result<bool> {
+    if state.embedding_jobs.lock().await.get(relative).copied() != Some(generation) {
+        return Ok(false);
+    }
+    let path = state.resolve(relative, false)?;
+    let current = tokio::fs::read_to_string(&path).await?;
+    let parsed = embedding_document::parse_markdown(&current);
+    if parsed.body != expected_body
+        || envelope.body_hash != embedding_document::body_hash(&parsed.body)
+    {
+        return Ok(false);
+    }
+    let physical = embedding_document::serialize_markdown(envelope, &parsed.body)?;
+    if physical != current {
+        atomic_write(&path, physical.as_bytes()).await?;
+    }
+    state.embedding_jobs.lock().await.remove(relative);
+    let _ = schematic_mcp::notify_documents_changed(
+        state.project.as_path(),
+        relative,
+        schematic_mcp::DocumentChangeKind::Replaced,
+    )
+    .await;
+    Ok(true)
+}
+
+fn markdown_owner(schematics: &Path, relative: &str) -> Result<String> {
+    let relative_path = Path::new(relative);
+    if relative_path.extension().and_then(|value| value.to_str()) != Some("md") {
+        return Err(Error::Message("embedding source must be Markdown".into()));
+    }
+    let file = relative_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let (diagram_folder, suffix) = if file == "main.md" {
+        (
+            relative_path.parent().unwrap_or(Path::new("")),
+            "diagram".to_owned(),
+        )
+    } else if relative_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        == Some("docs")
+    {
+        (
+            relative_path
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or(Path::new("")),
+            relative_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_owned(),
+        )
+    } else {
+        return Err(Error::Message(
+            "Markdown is not connected to a schematic owner".into(),
+        ));
+    };
+    let diagram = ["cmmn", "bpmn"]
+        .iter()
+        .map(|extension| diagram_folder.join(format!("main.{extension}")))
+        .find(|candidate| schematics.join(candidate).is_file())
+        .ok_or_else(|| Error::Message("Markdown owner diagram does not exist".into()))?;
+    Ok(format!(
+        "{}#{suffix}",
+        diagram.to_string_lossy().replace('\\', "/")
+    ))
 }
 
 async fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
@@ -824,7 +1126,22 @@ async fn rename_documentation(
         return Err(Error::Message("documentation target already exists".into()));
     }
     if old.exists() {
-        tokio::fs::rename(old, new).await?;
+        tokio::fs::rename(&old, &new).await?;
+        let relative = new
+            .strip_prefix(state.schematics.as_path())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let physical = tokio::fs::read_to_string(&new).await?;
+        let body = embedding_document::parse_markdown(&physical).body;
+        atomic_write(&new, body.as_bytes()).await?;
+        schedule_embedding(&state, relative.clone(), body).await;
+        let _ = schematic_mcp::notify_documents_changed(
+            state.project.as_path(),
+            &relative,
+            schematic_mcp::DocumentChangeKind::Renamed,
+        )
+        .await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -895,6 +1212,17 @@ async fn resolve_composition(
         if !documentation.exists() {
             atomic_write(&documentation, STARTER_MD.as_bytes()).await?;
         }
+        let relative_diagram = diagram
+            .strip_prefix(state.schematics.as_path())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let _ = schematic_mcp::notify_documents_changed(
+            state.project.as_path(),
+            &relative_diagram,
+            schematic_mcp::DocumentChangeKind::Created,
+        )
+        .await;
     }
     let relative = |path: &Path| {
         path.strip_prefix(state.schematics.as_path())
@@ -937,6 +1265,13 @@ async fn rename_package(
         &request.old_package_name,
         &request.new_package_name,
     )?;
+    let renamed = format!("{new_folder}/main.cmmn");
+    let _ = schematic_mcp::notify_documents_changed(
+        state.project.as_path(),
+        &renamed,
+        schematic_mcp::DocumentChangeKind::Renamed,
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -985,6 +1320,13 @@ async fn rename_process(
         &request.old_qualified_name,
         &request.new_qualified_name,
     )?;
+    let renamed = format!("{new_folder}/main.bpmn");
+    let _ = schematic_mcp::notify_documents_changed(
+        state.project.as_path(),
+        &renamed,
+        schematic_mcp::DocumentChangeKind::Renamed,
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1336,9 +1678,67 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(bytes, b"complete documentation");
-        let (status, bytes) = send(router, "GET", "/api/diagrams", None).await;
+        let (status, bytes) = send(router.clone(), "GET", "/api/diagrams", None).await;
         assert_eq!(status, StatusCode::OK);
         assert!(String::from_utf8(bytes).unwrap().contains("main.cmmn"));
+        let (status, bytes) = send(router, "GET", "/api/graph-refresh", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["status"], "notRunning");
+    }
+
+    #[tokio::test]
+    async fn embedding_header_publication_is_compare_and_swap_and_hidden_from_ui() {
+        let (directory, layout) = initialized();
+        let state = AppState::new(directory.path()).unwrap();
+        let path = layout.schematics.join("main.md");
+        let old_body = "# Old body\n";
+        let newer_body = "# Newer body\n";
+        atomic_write(&path, newer_body.as_bytes()).await.unwrap();
+        let envelope = schematic_graph::derive_embedding_envelope(
+            directory.path(),
+            "main.cmmn#diagram",
+            old_body,
+            &schematic_graph::LoadOptions::deterministic_test(),
+        )
+        .unwrap();
+        state
+            .embedding_jobs
+            .lock()
+            .await
+            .insert("main.md".into(), 1);
+        assert!(
+            !publish_embedding_header(&state, "main.md", 1, old_body, &envelope)
+                .await
+                .unwrap()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), newer_body);
+
+        let envelope = schematic_graph::derive_embedding_envelope(
+            directory.path(),
+            "main.cmmn#diagram",
+            newer_body,
+            &schematic_graph::LoadOptions::deterministic_test(),
+        )
+        .unwrap();
+        state
+            .embedding_jobs
+            .lock()
+            .await
+            .insert("main.md".into(), 2);
+        assert!(
+            publish_embedding_header(&state, "main.md", 2, newer_body, &envelope)
+                .await
+                .unwrap()
+        );
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .starts_with(embedding_document::HEADER_START)
+        );
+        let (status, bytes) = send(app(state), "GET", "/api/file?path=main.md", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, newer_body.as_bytes());
     }
 
     #[tokio::test]
@@ -1367,8 +1767,22 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(response["graphRefresh"]["status"], "updated");
-        let active = response["graphRefresh"]["activeRevision"].as_str().unwrap();
+        assert_eq!(response["graphRefresh"]["status"], "queued");
+        let active = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let status = schematic_mcp::graph_refresh_status(directory.path()).await;
+                if !matches!(
+                    status.status,
+                    schematic_mcp::GraphRefreshStatus::Queued
+                        | schematic_mcp::GraphRefreshStatus::Processing
+                ) {
+                    break status.active_revision.unwrap();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         assert_ne!(active, initial);
         assert_eq!(server.summary().await.revision, active);
         assert_eq!(

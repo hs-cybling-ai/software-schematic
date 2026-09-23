@@ -1,4 +1,10 @@
-use crate::{Error, Result};
+use crate::{
+    Error, Result,
+    embedding_document::{
+        CHUNKER_VERSION, EmbeddingChunk, EmbeddingEnvelope, ParsedMarkdown, body_hash,
+        embedding_revision, parse_markdown, validate_envelope_shape,
+    },
+};
 use grafeo::{GrafeoDB, NodeId, Value};
 use grafeo_engine::embedding::{EmbeddingModel, EmbeddingModelConfig};
 use quick_xml::{Reader, events::Event};
@@ -9,7 +15,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use walkdir::WalkDir;
@@ -140,6 +146,9 @@ pub struct SnapshotSummary {
     pub project_id: String,
     pub root_id: String,
     pub revision: String,
+    pub embedding_revision: String,
+    pub retrieval_mode: String,
+    pub vector_ready: bool,
     pub loaded_at_epoch_ms: u128,
     pub diagrams: usize,
     pub entities: usize,
@@ -199,11 +208,11 @@ pub enum EmbeddingProfile {
 
 pub fn onnx_install_guidance() -> &'static str {
     if cfg!(target_os = "macos") {
-        "ONNX Runtime is required only for `ssw mcp` local embeddings.\nInstall it with:\n  brew install onnxruntime\n\nThe diagram editor remains available with `./ssw`."
+        "ONNX Runtime is required only to generate Markdown embeddings.\nInstall it with:\n  brew install onnxruntime\n\nThe diagram editor and MCP text retrieval remain available without it."
     } else if cfg!(target_os = "windows") {
-        "ONNX Runtime is required only for `ssw mcp` local embeddings.\nInstall the Microsoft.ML.OnnxRuntime native package and place onnxruntime.dll beside .ss\\bin\\ss.exe.\nSee https://onnxruntime.ai/docs/get-started/with-c.html\n\nThe diagram editor remains available with ssw.cmd."
+        "ONNX Runtime is required only to generate Markdown embeddings.\nInstall the Microsoft.ML.OnnxRuntime native package and place onnxruntime.dll beside .ss\\bin\\ss.exe.\nSee https://onnxruntime.ai/docs/get-started/with-c.html\n\nThe diagram editor and MCP text retrieval remain available without it."
     } else {
-        "ONNX Runtime is required only for `ssw mcp` local embeddings.\nInstall a compatible libonnxruntime.so and make it available through the system library path.\nSee https://onnxruntime.ai/docs/install/\n\nThe diagram editor remains available with ./ssw."
+        "ONNX Runtime is required only to generate Markdown embeddings.\nInstall a compatible libonnxruntime.so and make it available through the system library path.\nSee https://onnxruntime.ai/docs/install/\n\nThe diagram editor and MCP text retrieval remain available without it."
     }
 }
 
@@ -252,12 +261,16 @@ fn locate_onnx_runtime() -> Option<PathBuf> {
 pub struct LoadOptions {
     pub limits: GraphLimits,
     pub embedding: EmbeddingProfile,
+    #[cfg(test)]
+    pub refresh_delay: std::time::Duration,
 }
 impl Default for LoadOptions {
     fn default() -> Self {
         Self {
             limits: GraphLimits::default(),
             embedding: EmbeddingProfile::Preset,
+            #[cfg(test)]
+            refresh_delay: std::time::Duration::ZERO,
         }
     }
 }
@@ -336,10 +349,25 @@ pub struct GraphSnapshot {
     pub relations: Vec<GraphRelation>,
     pub chunks: BTreeMap<String, DocumentChunk>,
     pub source_map: BTreeMap<String, SourceCitation>,
+    pub source_hashes: BTreeMap<String, String>,
+    pub dependencies: BTreeMap<String, BTreeSet<String>>,
+    pub reverse_dependencies: BTreeMap<String, BTreeSet<String>>,
+    pub reuse: BuildReuseStats,
+    parsed_diagrams: BTreeMap<String, ParsedDiagram>,
     internal_chunks: HashMap<NodeId, String>,
+    embedding_cache: BTreeMap<(String, String), Vec<f32>>,
     embedding_name: String,
+    embedding_profile: EmbeddingProfile,
+    query_embedding_ready: OnceLock<std::result::Result<(), String>>,
     limits: GraphLimits,
     project_root: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildReuseStats {
+    pub parsed_diagrams: usize,
+    pub embeddings: usize,
 }
 
 impl std::fmt::Debug for GraphSnapshot {
@@ -375,7 +403,23 @@ pub fn load_schematic_graph(
     project: impl AsRef<Path>,
     options: LoadOptions,
 ) -> Result<GraphSnapshot> {
-    let root = project.as_ref().canonicalize()?;
+    load_schematic_graph_with_previous(project.as_ref(), options, None)
+}
+
+pub fn refresh_schematic_graph(
+    project: impl AsRef<Path>,
+    options: LoadOptions,
+    previous: &GraphSnapshot,
+) -> Result<GraphSnapshot> {
+    load_schematic_graph_with_previous(project.as_ref(), options, Some(previous))
+}
+
+fn load_schematic_graph_with_previous(
+    project: &Path,
+    options: LoadOptions,
+    previous: Option<&GraphSnapshot>,
+) -> Result<GraphSnapshot> {
+    let root = project.canonicalize()?;
     let schematics = root
         .join("schematics")
         .canonicalize()
@@ -401,6 +445,10 @@ pub fn load_schematic_graph(
     let mut diagrams = Vec::new();
     let mut diagnostics = Vec::new();
     let mut skipped_elements = BTreeSet::new();
+    let mut source_hashes = BTreeMap::new();
+    let mut dependencies: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut parsed_diagrams = BTreeMap::new();
+    let mut reuse = BuildReuseStats::default();
     while let Some(relative) = queue.pop_front() {
         let relative = confined_relative(&relative)?;
         if !visited.insert(relative.clone()) {
@@ -412,11 +460,29 @@ pub fn load_schematic_graph(
         let full = confined_existing(&schematics, &relative)?;
         let xml = fs::read_to_string(&full)
             .map_err(|e| Error::Message(format!("{}: {e}", relative.display())))?;
-        let diagram = parse_diagram(&xml, &relative)?;
+        let relative_key = relative.to_string_lossy().replace('\\', "/");
+        let xml_hash = short_hash(xml.as_bytes(), 64);
+        source_hashes.insert(relative_key.clone(), xml_hash.clone());
+        let cached = previous
+            .filter(|snapshot| snapshot.source_hashes.get(&relative_key) == Some(&xml_hash))
+            .and_then(|snapshot| snapshot.parsed_diagrams.get(&relative_key))
+            .cloned();
+        let diagram = match cached {
+            Some(diagram) => {
+                reuse.parsed_diagrams += 1;
+                diagram
+            }
+            None => parse_diagram(&xml, &relative)?,
+        };
+        parsed_diagrams.insert(relative_key.clone(), diagram.clone());
         for element in &diagram.elements {
             if let Some(name) = &element.composition {
                 let target = PathBuf::from(name.replace('.', "/")).join("main.bpmn");
                 if schematics.join(&target).is_file() {
+                    dependencies
+                        .entry(relative_key.clone())
+                        .or_default()
+                        .insert(target.to_string_lossy().replace('\\', "/"));
                     queue.push_back(target);
                 } else {
                     skipped_elements.insert((relative.clone(), element.id.clone()));
@@ -506,19 +572,8 @@ pub fn load_schematic_graph(
         }
     }
     let db = GrafeoDB::new_in_memory();
-    let embedding_name = configure_embedding(&db, &root, &options.embedding)?;
-    let readiness = db
-        .embed_text(&embedding_name, &["readiness"])
-        .map_err(graph_error)?
-        .first()
-        .cloned()
-        .ok_or_else(|| Error::Message("embedding model returned no readiness vector".into()))?;
-    if readiness.is_empty() || readiness.iter().any(|value| !value.is_finite()) {
-        return Err(Error::Message(
-            "embedding model returned invalid readiness vector".into(),
-        ));
-    }
-    let dimensions = readiness.len();
+    let embedding_name = embedding_profile_name(&options.embedding);
+    let default_dimensions = embedding_profile_dimensions(&options.embedding).unwrap_or(0);
     let mut entities = BTreeMap::new();
     let mut relations = Vec::new();
     let mut chunks = BTreeMap::new();
@@ -526,15 +581,24 @@ pub fn load_schematic_graph(
     let mut source_to_urn = HashMap::new();
     let mut diagram_urns = HashMap::new();
     let mut revision_hasher = Sha256::new();
+    let mut artifact_vectors = BTreeMap::<String, Vec<f32>>::new();
+    let mut accepted_envelopes = Vec::<EmbeddingEnvelope>::new();
     for (relative, diagram) in &diagrams {
         let diagram_id = urn(&project_id, "diagram", &diagram.owner, None);
         diagram_urns.insert(relative.clone(), diagram_id.clone());
         let diagram_md_path = relative.parent().unwrap_or(Path::new("")).join("main.md");
-        let markdown = read_optional_document(
+        let parsed_markdown = read_optional_document(
             &schematics,
             &diagram_md_path,
             options.limits.max_document_bytes,
         )?;
+        let markdown = parsed_markdown.body;
+        if !markdown.is_empty() {
+            source_hashes.insert(
+                diagram_md_path.to_string_lossy().replace('\\', "/"),
+                short_hash(markdown.as_bytes(), 64),
+            );
+        }
         revision_hasher.update(fs::read(schematics.join(relative))?);
         revision_hasher.update(markdown.as_bytes());
         let entity = GraphEntity {
@@ -570,8 +634,22 @@ pub fn load_schematic_graph(
             &markdown,
             &options.limits,
             &embedding_name,
-            dimensions,
+            default_dimensions,
             &mut chunks,
+        );
+        collect_artifact_vectors(
+            parsed_markdown.envelope,
+            parsed_markdown.diagnostic,
+            &markdown,
+            &format!("{}#diagram", relative.to_string_lossy().replace('\\', "/")),
+            &diagram_id,
+            &embedding_name,
+            embedding_profile_dimensions(&options.embedding),
+            &chunks,
+            &mut artifact_vectors,
+            &mut accepted_envelopes,
+            &mut diagnostics,
+            &diagram_md_path,
         );
         for element in &diagram.elements {
             if skipped_elements.contains(&(relative.clone(), element.id.clone())) {
@@ -591,8 +669,15 @@ pub fn load_schematic_graph(
                 .unwrap_or(Path::new(""))
                 .join("docs")
                 .join(format!("{}.md", element.id));
-            let markdown =
+            let parsed_markdown =
                 read_optional_document(&schematics, &doc_path, options.limits.max_document_bytes)?;
+            let markdown = parsed_markdown.body;
+            if !markdown.is_empty() {
+                source_hashes.insert(
+                    doc_path.to_string_lossy().replace('\\', "/"),
+                    short_hash(markdown.as_bytes(), 64),
+                );
+            }
             revision_hasher.update(markdown.as_bytes());
             let entity = GraphEntity {
                 id: id.clone(),
@@ -632,8 +717,26 @@ pub fn load_schematic_graph(
                 &markdown,
                 &options.limits,
                 &embedding_name,
-                dimensions,
+                default_dimensions,
                 &mut chunks,
+            );
+            collect_artifact_vectors(
+                parsed_markdown.envelope,
+                parsed_markdown.diagnostic,
+                &markdown,
+                &format!(
+                    "{}#{}",
+                    relative.to_string_lossy().replace('\\', "/"),
+                    element.id
+                ),
+                &id,
+                &embedding_name,
+                embedding_profile_dimensions(&options.embedding),
+                &chunks,
+                &mut artifact_vectors,
+                &mut accepted_envelopes,
+                &mut diagnostics,
+                &doc_path,
             );
         }
     }
@@ -692,29 +795,31 @@ pub fn load_schematic_graph(
         let n = db.create_node_with_props(&["SchematicEntity", label], entity_properties(entity));
         urn_to_node.insert(entity.id.clone(), n);
     }
-    let texts: Vec<&str> = chunks.values().map(|c| c.markdown.as_str()).collect();
-    let embeddings = if texts.is_empty() {
-        Vec::new()
-    } else {
-        db.embed_text(&embedding_name, &texts)
-            .map_err(graph_error)?
-    };
-    for (chunk, vector) in chunks.values_mut().zip(embeddings) {
-        if vector.len() != dimensions || vector.iter().any(|v| !v.is_finite()) {
-            return Err(Error::Message(
-                "embedding model returned invalid vector".into(),
-            ));
+    let mut embedding_cache = BTreeMap::new();
+    let vector_dimensions = artifact_vectors.values().next().map(Vec::len);
+    for chunk in chunks.values_mut() {
+        let vector = artifact_vectors.get(&chunk.id).cloned();
+        if let Some(value) = &vector {
+            chunk.dimensions = value.len();
+            let key = (embedding_name.clone(), chunk.content_hash.clone());
+            if previous
+                .and_then(|snapshot| snapshot.embedding_cache.get(&key))
+                .is_some_and(|prior| prior == value)
+            {
+                reuse.embeddings += 1;
+            }
+            embedding_cache.insert(key, value.clone());
         }
-        let n = db.create_node_with_props(
-            &["DocumentChunk"],
-            [
-                ("id", Value::from(chunk.id.clone())),
-                ("ownerId", Value::from(chunk.owner_id.clone())),
-                ("markdown", Value::from(chunk.markdown.clone())),
-                ("contentHash", Value::from(chunk.content_hash.clone())),
-                ("embedding", Value::Vector(vector.into())),
-            ],
-        );
+        let mut properties = vec![
+            ("id", Value::from(chunk.id.clone())),
+            ("ownerId", Value::from(chunk.owner_id.clone())),
+            ("markdown", Value::from(chunk.markdown.clone())),
+            ("contentHash", Value::from(chunk.content_hash.clone())),
+        ];
+        if let Some(vector) = vector {
+            properties.push(("embedding", Value::Vector(vector.into())));
+        }
+        let n = db.create_node_with_props(&["DocumentChunk"], properties);
         internal.insert(n, chunk.id.clone());
         if let Some(owner) = urn_to_node.get(&chunk.owner_id) {
             db.create_edge(*owner, n, "DOCUMENTED_BY");
@@ -735,19 +840,23 @@ pub fn load_schematic_graph(
     if !chunks.is_empty() {
         db.create_text_index("DocumentChunk", "markdown")
             .map_err(graph_error)?;
-        db.create_vector_index(
-            "DocumentChunk",
-            "embedding",
-            Some(dimensions),
-            Some("cosine"),
-            None,
-            None,
-            None,
-        )
-        .map_err(graph_error)?;
+        if let Some(dimensions) = vector_dimensions {
+            db.create_vector_index(
+                "DocumentChunk",
+                "embedding",
+                Some(dimensions),
+                Some("cosine"),
+                None,
+                None,
+                None,
+            )
+            .map_err(graph_error)?;
+        }
     }
-    revision_hasher.update(embedding_name.as_bytes());
     let revision = format!("sha256:{}", hex(&revision_hasher.finalize()));
+    let envelope_refs = accepted_envelopes.iter().collect::<Vec<_>>();
+    let embedding_revision = embedding_revision(&envelope_refs);
+    let vector_ready = !chunks.is_empty() && artifact_vectors.len() == chunks.len();
     let root_id = diagram_urns
         .get(&PathBuf::from("main.cmmn"))
         .cloned()
@@ -757,6 +866,9 @@ pub fn load_schematic_graph(
         project_id,
         root_id,
         revision,
+        embedding_revision,
+        retrieval_mode: if vector_ready { "hybrid" } else { "text" }.into(),
+        vector_ready,
         loaded_at_epoch_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -767,6 +879,15 @@ pub fn load_schematic_graph(
         embedding_model: embedding_name.clone(),
         diagnostics,
     };
+    let mut reverse_dependencies: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (source, targets) in &dependencies {
+        for target in targets {
+            reverse_dependencies
+                .entry(target.clone())
+                .or_default()
+                .insert(source.clone());
+        }
+    }
     Ok(GraphSnapshot {
         db,
         summary,
@@ -774,8 +895,16 @@ pub fn load_schematic_graph(
         relations,
         chunks,
         source_map,
+        source_hashes,
+        dependencies,
+        reverse_dependencies,
+        reuse,
+        parsed_diagrams,
         internal_chunks: internal,
+        embedding_cache,
         embedding_name,
+        embedding_profile: options.embedding,
+        query_embedding_ready: OnceLock::new(),
         limits: options.limits,
         project_root: root,
     })
@@ -889,11 +1018,24 @@ impl GraphSnapshot {
         if self.chunks.is_empty() {
             return Ok(Vec::new());
         }
-        let query_vec = self
-            .db
-            .embed_text(&self.embedding_name, &[query])
-            .map_err(graph_error)?
-            .remove(0);
+        let query_vec = if self.summary.vector_ready {
+            let ready = self.query_embedding_ready.get_or_init(|| {
+                configure_embedding(&self.db, &self.project_root, &self.embedding_profile)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+            match ready {
+                Ok(()) => Some(
+                    self.db
+                        .embed_text(&self.embedding_name, &[query])
+                        .map_err(graph_error)?
+                        .remove(0),
+                ),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
         let matches = self
             .db
             .hybrid_search(
@@ -901,7 +1043,7 @@ impl GraphSnapshot {
                 "markdown",
                 "embedding",
                 query,
-                Some(&query_vec),
+                query_vec.as_deref(),
                 limit * 2,
                 None,
             )
@@ -1142,6 +1284,176 @@ fn configure_embedding(db: &GrafeoDB, root: &Path, profile: &EmbeddingProfile) -
         }
     }
 }
+
+pub fn embedding_profile_name(profile: &EmbeddingProfile) -> String {
+    match profile {
+        EmbeddingProfile::DeterministicTest => "ssw-deterministic-test".into(),
+        EmbeddingProfile::NonFiniteTest => "ssw-non-finite-test".into(),
+        EmbeddingProfile::FailingTest => "ssw-failing-test".into(),
+        EmbeddingProfile::LocalOnnx { model, .. } => model
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("local-model")
+            .into(),
+        EmbeddingProfile::Preset => EMBEDDING_MODEL.into(),
+    }
+}
+
+fn embedding_profile_dimensions(profile: &EmbeddingProfile) -> Option<usize> {
+    match profile {
+        EmbeddingProfile::DeterministicTest => Some(64),
+        EmbeddingProfile::NonFiniteTest | EmbeddingProfile::FailingTest => Some(4),
+        EmbeddingProfile::Preset => Some(384),
+        EmbeddingProfile::LocalOnnx { .. } => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_artifact_vectors(
+    envelope: Option<EmbeddingEnvelope>,
+    parse_diagnostic: Option<String>,
+    body: &str,
+    expected_owner: &str,
+    graph_owner_id: &str,
+    expected_model: &str,
+    expected_dimensions: Option<usize>,
+    chunks: &BTreeMap<String, DocumentChunk>,
+    vectors: &mut BTreeMap<String, Vec<f32>>,
+    accepted: &mut Vec<EmbeddingEnvelope>,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &Path,
+) {
+    let source = source.to_string_lossy().replace('\\', "/");
+    let reject = |message: String, diagnostics: &mut Vec<Diagnostic>| {
+        diagnostics.push(Diagnostic {
+            level: "warning".into(),
+            message,
+            source: Some(source.clone()),
+        });
+    };
+    if let Some(message) = parse_diagnostic {
+        reject(message, diagnostics);
+        return;
+    }
+    if body.trim().is_empty() {
+        return;
+    }
+    let Some(envelope) = envelope else {
+        reject(
+            "embedding header is missing; vector retrieval is pending".into(),
+            diagnostics,
+        );
+        return;
+    };
+    if let Err(error) = validate_envelope_shape(&envelope) {
+        reject(error.to_string(), diagnostics);
+        return;
+    }
+    if envelope.owner != expected_owner
+        || envelope.body_hash != body_hash(body)
+        || envelope.model != expected_model
+        || expected_dimensions.is_some_and(|value| value != envelope.dimensions)
+    {
+        reject(
+            "embedding header is stale or belongs to another owner/model".into(),
+            diagnostics,
+        );
+        return;
+    }
+    let mut owner_chunks = chunks
+        .values()
+        .filter(|chunk| chunk.owner_id == graph_owner_id)
+        .collect::<Vec<_>>();
+    owner_chunks.sort_by_key(|chunk| chunk.ordinal);
+    if owner_chunks.len() != envelope.chunks.len() {
+        reject(
+            "embedding header chunk count does not match authored Markdown".into(),
+            diagnostics,
+        );
+        return;
+    }
+    for (chunk, artifact) in owner_chunks.iter().zip(&envelope.chunks) {
+        if artifact.id != artifact_chunk_id(&chunk.content_hash, chunk.ordinal)
+            || artifact.ordinal != chunk.ordinal
+            || artifact.heading_path != chunk.heading_path
+            || artifact.content_hash != chunk.content_hash
+        {
+            reject(
+                "embedding header chunks do not match authored Markdown".into(),
+                diagnostics,
+            );
+            return;
+        }
+    }
+    for artifact in &envelope.chunks {
+        vectors.insert(artifact.id.clone(), artifact.vector.clone());
+    }
+    accepted.push(envelope);
+}
+
+fn artifact_chunk_id(content_hash: &str, ordinal: usize) -> String {
+    format!("{content_hash}:{ordinal}")
+}
+
+pub fn derive_embedding_envelope(
+    project: &Path,
+    owner: &str,
+    body: &str,
+    options: &LoadOptions,
+) -> Result<EmbeddingEnvelope> {
+    let db = GrafeoDB::new_in_memory();
+    let model = configure_embedding(&db, project, &options.embedding)?;
+    let pieces = chunk_markdown(
+        body,
+        options.limits.chunk_chars,
+        options.limits.chunk_overlap,
+    );
+    let texts = pieces
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>();
+    let vectors = if texts.is_empty() {
+        Vec::new()
+    } else {
+        db.embed_text(&model, &texts).map_err(graph_error)?
+    };
+    let dimensions = vectors
+        .first()
+        .map(Vec::len)
+        .unwrap_or_else(|| embedding_profile_dimensions(&options.embedding).unwrap_or(0));
+    if dimensions == 0 {
+        return Err(Error::Message(
+            "embedding model returned zero dimensions".into(),
+        ));
+    }
+    let mut chunks = Vec::with_capacity(pieces.len());
+    for (ordinal, ((heading_path, text), vector)) in pieces.into_iter().zip(vectors).enumerate() {
+        if vector.len() != dimensions || vector.iter().any(|value| !value.is_finite()) {
+            return Err(Error::Message(
+                "embedding model returned invalid vector".into(),
+            ));
+        }
+        let content_hash = short_hash(text.as_bytes(), 32);
+        chunks.push(EmbeddingChunk {
+            id: artifact_chunk_id(&content_hash, ordinal),
+            content_hash,
+            ordinal,
+            heading_path,
+            vector,
+        });
+    }
+    let envelope = EmbeddingEnvelope {
+        schema: crate::embedding_document::EMBEDDING_SCHEMA.into(),
+        owner: owner.into(),
+        body_hash: body_hash(body),
+        chunker: CHUNKER_VERSION.into(),
+        model,
+        dimensions,
+        chunks,
+    };
+    validate_envelope_shape(&envelope)?;
+    Ok(envelope)
+}
 fn graph_error(error: impl std::fmt::Display) -> Error {
     Error::Message(format!("Grafeo: {error}"))
 }
@@ -1343,10 +1655,14 @@ fn confined_existing(root: &Path, relative: &Path) -> Result<PathBuf> {
     }
     Ok(full)
 }
-fn read_optional_document(root: &Path, relative: &Path, max: usize) -> Result<String> {
+fn read_optional_document(root: &Path, relative: &Path, max: usize) -> Result<ParsedMarkdown> {
     let path = root.join(relative);
     if !path.exists() {
-        return Ok(String::new());
+        return Ok(ParsedMarkdown {
+            body: String::new(),
+            envelope: None,
+            diagnostic: None,
+        });
     }
     let full = path.canonicalize()?;
     if !full.starts_with(root) {
@@ -1356,7 +1672,9 @@ fn read_optional_document(root: &Path, relative: &Path, max: usize) -> Result<St
     if bytes.len() > max {
         return Err(Error::Message(format!("document exceeds {max} bytes")));
     }
-    String::from_utf8(bytes).map_err(|_| Error::Message("Markdown must be UTF-8".into()))
+    let physical =
+        String::from_utf8(bytes).map_err(|_| Error::Message("Markdown must be UTF-8".into()))?;
+    Ok(parse_markdown(&physical))
 }
 fn add_chunks(
     project: &str,
@@ -1657,7 +1975,7 @@ mod tests {
         let mut options = LoadOptions::deterministic_test();
         options.embedding = EmbeddingProfile::FailingTest;
         assert!(
-            load_schematic_graph(project.path(), options)
+            derive_embedding_envelope(project.path(), "main.cmmn#diagram", "content", &options)
                 .unwrap_err()
                 .to_string()
                 .contains("fixture embedding failure")
@@ -1665,24 +1983,181 @@ mod tests {
         let mut options = LoadOptions::deterministic_test();
         options.embedding = EmbeddingProfile::NonFiniteTest;
         assert!(
-            load_schematic_graph(project.path(), options)
+            derive_embedding_envelope(project.path(), "main.cmmn#diagram", "content", &options)
                 .unwrap_err()
                 .to_string()
-                .contains("invalid readiness vector")
+                .contains("invalid vector")
         );
+        let graph =
+            load_schematic_graph(project.path(), LoadOptions::deterministic_test()).unwrap();
+        assert!(!graph.summary.vector_ready);
+    }
+
+    #[test]
+    fn graph_startup_imports_generator_header_without_touching_diagram() {
+        let project = project_with_root(
+            r#"<cmmn:definitions xmlns:cmmn="x" id="D"><cmmn:task id="Task_1"/></cmmn:definitions>"#,
+        );
+        let diagram_path = project.path().join("schematics/main.cmmn");
+        let diagram_before = fs::read(&diagram_path).unwrap();
+        let body = "# Generated contract\nFast vector startup.\n";
+        let options = LoadOptions::deterministic_test();
+        let envelope =
+            derive_embedding_envelope(project.path(), "main.cmmn#diagram", body, &options).unwrap();
+        let physical = crate::embedding_document::serialize_markdown(&envelope, body).unwrap();
+        fs::write(project.path().join("schematics/main.md"), physical).unwrap();
+
+        let graph = load_schematic_graph(project.path(), options).unwrap();
+        assert!(graph.summary.vector_ready);
+        assert_eq!(graph.summary.retrieval_mode, "hybrid");
+        assert_ne!(graph.summary.embedding_revision, embedding_revision(&[]));
+        assert_eq!(fs::read(diagram_path).unwrap(), diagram_before);
+    }
+
+    #[test]
+    fn imports_multichunk_header_for_markdown_without_headings() {
+        let project = project_with_root("<definitions id=\"D\"/>");
+        let body = "This headingless document is deliberately long enough to span several chunks without relying on Markdown section headers.\n";
+        let mut options = LoadOptions::deterministic_test();
+        options.limits.chunk_chars = 24;
+        options.limits.chunk_overlap = 4;
+        let envelope =
+            derive_embedding_envelope(project.path(), "main.cmmn#diagram", body, &options).unwrap();
+        assert!(envelope.chunks.len() > 1);
+        let physical = crate::embedding_document::serialize_markdown(&envelope, body).unwrap();
+        fs::write(project.path().join("schematics/main.md"), physical).unwrap();
+
+        let graph = load_schematic_graph(project.path(), options).unwrap();
+
+        assert!(graph.summary.vector_ready);
+        assert_eq!(graph.summary.retrieval_mode, "hybrid");
+        assert!(!graph.summary.diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("embedding header chunks do not match authored Markdown")
+        }));
+    }
+
+    #[test]
+    fn headerless_cold_start_never_invokes_failing_model() {
+        let project = project_with_root("<definitions id=\"D\"/>");
+        fs::write(
+            project.path().join("schematics/main.md"),
+            "# Headerless legacy project\n",
+        )
+        .unwrap();
+        let mut options = LoadOptions::deterministic_test();
+        options.embedding = EmbeddingProfile::FailingTest;
+        let started = std::time::Instant::now();
+        let graph = load_schematic_graph(project.path(), options).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(graph.summary.retrieval_mode, "text");
+        assert!(!graph.summary.vector_ready);
+    }
+
+    #[test]
+    fn stale_and_wrong_model_headers_degrade_without_blocking_graph() {
+        let project = project_with_root("<definitions id=\"D\"/>");
+        let original = "# Original\n";
+        let options = LoadOptions::deterministic_test();
+        let mut envelope =
+            derive_embedding_envelope(project.path(), "main.cmmn#diagram", original, &options)
+                .unwrap();
+        envelope.model = "another-model".into();
+        let physical =
+            crate::embedding_document::serialize_markdown(&envelope, "# New body\n").unwrap();
+        fs::write(project.path().join("schematics/main.md"), physical).unwrap();
+        let graph = load_schematic_graph(project.path(), options).unwrap();
+        assert!(!graph.summary.vector_ready);
+        assert_eq!(graph.summary.retrieval_mode, "text");
+        assert!(graph.summary.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message.contains("stale")
+                || diagnostic.message.contains("another owner/model")
+        }));
     }
 
     #[test]
     fn missing_onnx_runtime_has_actionable_platform_guidance() {
         let guidance = onnx_install_guidance();
-        assert!(guidance.contains("required only for `ssw mcp`"));
-        assert!(guidance.contains("diagram editor remains available"));
+        assert!(guidance.contains("required only to generate Markdown embeddings"));
+        assert!(guidance.contains("MCP text retrieval remain available"));
         if cfg!(target_os = "macos") {
             assert!(guidance.contains("brew install onnxruntime"));
         }
         if cfg!(target_os = "windows") {
             assert!(guidance.contains("onnxruntime.dll"));
         }
+    }
+
+    #[test]
+    fn incremental_refresh_matches_a_clean_complete_build() {
+        let directory = project_with_root(
+            r#"<cmmn:definitions xmlns:cmmn="x" id="D"><cmmn:task id="Task_1" name="Checkout"/></cmmn:definitions>"#,
+        );
+        fs::write(
+            directory.path().join("schematics/main.md"),
+            "# Checkout\nOriginal contract.",
+        )
+        .unwrap();
+        fs::create_dir_all(directory.path().join("schematics/docs")).unwrap();
+        fs::write(
+            directory.path().join("schematics/docs/Task_1.md"),
+            "# Task\nStable task documentation.",
+        )
+        .unwrap();
+        let initial =
+            load_schematic_graph(directory.path(), LoadOptions::deterministic_test()).unwrap();
+        fs::write(
+            directory.path().join("schematics/main.md"),
+            "# Checkout\nUpdated contract with validation.",
+        )
+        .unwrap();
+        let incremental = refresh_schematic_graph(
+            directory.path(),
+            LoadOptions::deterministic_test(),
+            &initial,
+        )
+        .unwrap();
+        let complete =
+            load_schematic_graph(directory.path(), LoadOptions::deterministic_test()).unwrap();
+
+        assert_eq!(incremental.summary.revision, complete.summary.revision);
+        assert_eq!(
+            serde_json::to_value(&incremental.entities).unwrap(),
+            serde_json::to_value(&complete.entities).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&incremental.relations).unwrap(),
+            serde_json::to_value(&complete.relations).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&incremental.chunks).unwrap(),
+            serde_json::to_value(&complete.chunks).unwrap()
+        );
+        assert_eq!(incremental.source_hashes, complete.source_hashes);
+        assert_eq!(incremental.dependencies, complete.dependencies);
+        assert_eq!(
+            incremental.reverse_dependencies,
+            complete.reverse_dependencies
+        );
+        assert_eq!(incremental.reuse.parsed_diagrams, 1);
+        assert_eq!(incremental.reuse.embeddings, 0);
+        let incremental_results = incremental
+            .search("validation", None, &[], None, 1, 10)
+            .unwrap();
+        let complete_results = complete
+            .search("validation", None, &[], None, 1, 10)
+            .unwrap();
+        assert_eq!(
+            incremental_results
+                .iter()
+                .map(|result| &result.owner.id)
+                .collect::<Vec<_>>(),
+            complete_results
+                .iter()
+                .map(|result| &result.owner.id)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[cfg(unix)]

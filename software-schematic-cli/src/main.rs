@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use software_schematic_cli::{
-    Result, assistant_auth_login, assistant_auth_logout, assistant_auth_status, init_project,
-    schematic_mcp::serve_mcp, serve, update_project,
+    Result, assistant_auth_login, assistant_auth_logout, assistant_auth_status,
+    backfill_embeddings, init_project, schematic_mcp::serve_mcp, serve, update_project,
 };
 use std::path::PathBuf;
 
@@ -35,6 +35,11 @@ enum Command {
     },
     /// Serve the compiled project schematic over MCP stdio.
     Mcp {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Precompute and persist Markdown embedding headers.
+    Embeddings {
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
@@ -78,6 +83,10 @@ async fn main() -> Result<()> {
             AuthCommand::Logout => assistant_auth_logout(project)?,
         },
         Command::Mcp { project } => serve_mcp(project).await?,
+        Command::Embeddings { project } => {
+            let count = backfill_embeddings(project).await?;
+            println!("Updated {count} Markdown embedding artifact(s).");
+        }
         Command::Update { project } => {
             let layout = update_project(project)?;
             println!(

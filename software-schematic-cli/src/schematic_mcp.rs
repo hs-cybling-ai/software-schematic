@@ -2,7 +2,7 @@ use crate::{
     Error, Result as SswResult,
     schematic_graph::{
         EntityKind, EntityResult, GraphSnapshot, LoadOptions, ScopeResult, SearchResult,
-        SnapshotSummary, load_schematic_graph,
+        SnapshotSummary, load_schematic_graph, refresh_schematic_graph,
     },
 };
 use rmcp::{
@@ -15,9 +15,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     fs,
-    path::{Path, PathBuf},
-    sync::Arc,
+    path::{Component, Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -74,27 +78,45 @@ pub struct ScopeRequest {
 #[serde(rename_all = "camelCase")]
 pub struct GraphRefreshOutcome {
     pub status: GraphRefreshStatus,
+    #[serde(default)]
+    pub notification_id: Option<u64>,
+    #[serde(default)]
+    pub affected_paths: Vec<String>,
     pub previous_revision: Option<String>,
     pub active_revision: Option<String>,
     pub diagnostic: Option<String>,
+    #[serde(default)]
+    pub queued_at_epoch_ms: Option<u128>,
+    #[serde(default)]
+    pub started_at_epoch_ms: Option<u128>,
+    #[serde(default)]
+    pub completed_at_epoch_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum GraphRefreshStatus {
+    Queued,
+    Processing,
     Updated,
     Unchanged,
     NotRunning,
     Failed,
+    Rejected,
 }
 
 impl GraphRefreshOutcome {
     pub fn not_running(diagnostic: impl Into<String>) -> Self {
         Self {
             status: GraphRefreshStatus::NotRunning,
+            notification_id: None,
+            affected_paths: Vec::new(),
             previous_revision: None,
             active_revision: None,
             diagnostic: Some(diagnostic.into()),
+            queued_at_epoch_ms: None,
+            started_at_epoch_ms: None,
+            completed_at_epoch_ms: Some(now_epoch_ms()),
         }
     }
 }
@@ -112,9 +134,36 @@ struct ControlMetadata {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ControlRequest {
+    version: u8,
     operation: String,
     project_id: String,
     token: String,
+    #[serde(default)]
+    notification_id: Option<u64>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    change_kind: Option<DocumentChangeKind>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DocumentChangeKind {
+    Replaced,
+    Created,
+    Renamed,
+    Deleted,
+}
+
+#[derive(Default)]
+struct RefreshCoordinatorState {
+    pending: BTreeMap<String, (u64, DocumentChangeKind)>,
+    running: bool,
+}
+
+struct RefreshCoordinator {
+    queue: Mutex<RefreshCoordinatorState>,
+    status: RwLock<GraphRefreshOutcome>,
 }
 fn default_hops() -> usize {
     1
@@ -126,41 +175,141 @@ fn default_direction() -> String {
     "both".into()
 }
 
+fn now_epoch_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
 #[derive(Clone)]
 pub struct SchematicMcp {
     tool_router: ToolRouter<Self>,
     state: Arc<RwLock<Arc<GraphSnapshot>>>,
     project: PathBuf,
     options: LoadOptions,
-    reload_lock: Arc<Mutex<()>>,
+    refresh: Arc<RefreshCoordinator>,
 }
 
 impl SchematicMcp {
     pub fn load(project: impl AsRef<Path>, options: LoadOptions) -> SswResult<Self> {
         let project = project.as_ref().canonicalize()?;
         let snapshot = Arc::new(load_schematic_graph(&project, options.clone())?);
+        let revision = snapshot.summary.revision.clone();
         Ok(Self {
             tool_router: Self::tool_router(),
             state: Arc::new(RwLock::new(snapshot)),
             project,
             options,
-            reload_lock: Arc::new(Mutex::new(())),
+            refresh: Arc::new(RefreshCoordinator {
+                queue: Mutex::new(RefreshCoordinatorState::default()),
+                status: RwLock::new(GraphRefreshOutcome {
+                    status: GraphRefreshStatus::Unchanged,
+                    notification_id: None,
+                    affected_paths: Vec::new(),
+                    previous_revision: Some(revision.clone()),
+                    active_revision: Some(revision),
+                    diagnostic: None,
+                    queued_at_epoch_ms: None,
+                    started_at_epoch_ms: None,
+                    completed_at_epoch_ms: Some(now_epoch_ms()),
+                }),
+            }),
         })
     }
     pub async fn summary(&self) -> SnapshotSummary {
         self.state.read().await.summary.clone()
     }
 
-    async fn refresh_from_documents(&self) -> GraphRefreshOutcome {
-        let _reload = self.reload_lock.lock().await;
+    async fn enqueue_refresh(
+        &self,
+        notification_id: u64,
+        path: String,
+        change_kind: DocumentChangeKind,
+    ) -> GraphRefreshOutcome {
+        let queued_at = now_epoch_ms();
         let previous = self.summary().await.revision;
+        let mut queue = self.refresh.queue.lock().await;
+        queue
+            .pending
+            .insert(path.clone(), (notification_id, change_kind));
+        let outcome = GraphRefreshOutcome {
+            status: GraphRefreshStatus::Queued,
+            notification_id: Some(notification_id),
+            affected_paths: vec![path],
+            previous_revision: Some(previous.clone()),
+            active_revision: Some(previous),
+            diagnostic: None,
+            queued_at_epoch_ms: Some(queued_at),
+            started_at_epoch_ms: None,
+            completed_at_epoch_ms: None,
+        };
+        *self.refresh.status.write().await = outcome.clone();
+        if !queue.running {
+            queue.running = true;
+            let server = self.clone();
+            tokio::spawn(async move { server.run_refresh_worker().await });
+        }
+        outcome
+    }
+
+    async fn refresh_status(&self) -> GraphRefreshOutcome {
+        self.refresh.status.read().await.clone()
+    }
+
+    async fn run_refresh_worker(self) {
+        loop {
+            let batch = {
+                let mut queue = self.refresh.queue.lock().await;
+                if queue.pending.is_empty() {
+                    queue.running = false;
+                    return;
+                }
+                std::mem::take(&mut queue.pending)
+            };
+            let notification_id = batch.values().map(|(id, _)| *id).max();
+            let paths = batch.keys().cloned().collect::<Vec<_>>();
+            let queued_at = self.refresh.status.read().await.queued_at_epoch_ms;
+            let previous = self.summary().await.revision;
+            *self.refresh.status.write().await = GraphRefreshOutcome {
+                status: GraphRefreshStatus::Processing,
+                notification_id,
+                affected_paths: paths.clone(),
+                previous_revision: Some(previous.clone()),
+                active_revision: Some(previous.clone()),
+                diagnostic: None,
+                queued_at_epoch_ms: queued_at,
+                started_at_epoch_ms: Some(now_epoch_ms()),
+                completed_at_epoch_ms: None,
+            };
+            let outcome = self
+                .refresh_from_documents(previous, notification_id, paths, queued_at)
+                .await;
+            let has_pending = !self.refresh.queue.lock().await.pending.is_empty();
+            if !has_pending {
+                *self.refresh.status.write().await = outcome;
+            }
+        }
+    }
+
+    async fn refresh_from_documents(
+        &self,
+        previous: String,
+        notification_id: Option<u64>,
+        affected_paths: Vec<String>,
+        queued_at_epoch_ms: Option<u128>,
+    ) -> GraphRefreshOutcome {
         let project = self.project.clone();
         let options = self.options.clone();
-        let replacement =
-            tokio::task::spawn_blocking(move || load_schematic_graph(project, options))
-                .await
-                .map_err(|error| Error::Message(format!("graph refresh task failed: {error}")))
-                .and_then(|result| result);
+        let prior_snapshot = self.state.read().await.clone();
+        let replacement = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            std::thread::sleep(options.refresh_delay);
+            refresh_schematic_graph(project, options, &prior_snapshot)
+        })
+        .await
+        .map_err(|error| Error::Message(format!("graph refresh task failed: {error}")))
+        .and_then(|result| result);
         match replacement {
             Ok(replacement) => {
                 let active = replacement.summary.revision.clone();
@@ -183,16 +332,26 @@ impl SchematicMcp {
                 *self.state.write().await = Arc::new(replacement);
                 GraphRefreshOutcome {
                     status,
+                    notification_id,
+                    affected_paths,
                     previous_revision: Some(previous),
                     active_revision: Some(active),
                     diagnostic: (!warning.is_empty()).then_some(warning),
+                    queued_at_epoch_ms,
+                    started_at_epoch_ms: Some(now_epoch_ms()),
+                    completed_at_epoch_ms: Some(now_epoch_ms()),
                 }
             }
             Err(error) => GraphRefreshOutcome {
                 status: GraphRefreshStatus::Failed,
+                notification_id,
+                affected_paths,
                 previous_revision: Some(previous.clone()),
                 active_revision: Some(previous),
                 diagnostic: Some(error.to_string()),
+                queued_at_epoch_ms,
+                started_at_epoch_ms: Some(now_epoch_ms()),
+                completed_at_epoch_ms: Some(now_epoch_ms()),
             },
         }
     }
@@ -406,18 +565,35 @@ async fn handle_control_connection(
     .map_err(|_| Error::Message("graph refresh notification timed out".into()))??;
     let request: ControlRequest = serde_json::from_str(&line)
         .map_err(|error| Error::Message(format!("invalid graph refresh notification: {error}")))?;
-    let response = if request.operation == "documents_changed"
+    let authenticated = request.version == 1
         && request.project_id == expected.project_id
-        && request.token == expected.token
-    {
-        server.refresh_from_documents().await
-    } else {
-        GraphRefreshOutcome {
-            status: GraphRefreshStatus::Failed,
-            previous_revision: None,
-            active_revision: Some(server.summary().await.revision),
-            diagnostic: Some("graph refresh notification was rejected".into()),
+        && request.token == expected.token;
+    let response = if authenticated && request.operation == "refresh_status" {
+        server.refresh_status().await
+    } else if authenticated && request.operation == "documents_changed" {
+        match (request.notification_id, request.path, request.change_kind) {
+            (Some(notification_id), Some(path), Some(change_kind)) => {
+                match validate_changed_path(&server.project, &path) {
+                    Ok(path) => {
+                        server
+                            .enqueue_refresh(notification_id, path, change_kind)
+                            .await
+                    }
+                    Err(error) => {
+                        rejected_refresh(error.to_string(), server.summary().await.revision)
+                    }
+                }
+            }
+            _ => rejected_refresh(
+                "graph refresh notification is missing change metadata",
+                server.summary().await.revision,
+            ),
         }
+    } else {
+        rejected_refresh(
+            "graph refresh notification was rejected",
+            server.summary().await.revision,
+        )
     };
     write
         .write_all(&serde_json::to_vec(&response).unwrap())
@@ -426,7 +602,86 @@ async fn handle_control_connection(
     Ok(())
 }
 
-pub async fn notify_documents_changed(project: &Path) -> GraphRefreshOutcome {
+fn rejected_refresh(diagnostic: impl Into<String>, active_revision: String) -> GraphRefreshOutcome {
+    GraphRefreshOutcome {
+        status: GraphRefreshStatus::Rejected,
+        notification_id: None,
+        affected_paths: Vec::new(),
+        previous_revision: None,
+        active_revision: Some(active_revision),
+        diagnostic: Some(diagnostic.into()),
+        queued_at_epoch_ms: None,
+        started_at_epoch_ms: None,
+        completed_at_epoch_ms: Some(now_epoch_ms()),
+    }
+}
+
+fn validate_changed_path(project: &Path, path: &str) -> SswResult<String> {
+    let candidate = Path::new(path);
+    if candidate.as_os_str().is_empty()
+        || candidate.is_absolute()
+        || candidate
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || !matches!(
+            candidate.extension().and_then(|value| value.to_str()),
+            Some("bpmn" | "cmmn" | "md")
+        )
+    {
+        return Err(Error::Message(
+            "changed document path is not a confined BPMN, CMMN, or Markdown path".into(),
+        ));
+    }
+    let schematics = project.join("schematics").canonicalize()?;
+    let target = schematics.join(candidate);
+    let confined = if target.exists() {
+        target.canonicalize()?.starts_with(&schematics)
+    } else {
+        target
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .is_some_and(|parent| parent.starts_with(&schematics))
+    };
+    if !confined {
+        return Err(Error::Message(
+            "changed document path escapes schematics".into(),
+        ));
+    }
+    Ok(candidate.to_string_lossy().replace('\\', "/"))
+}
+
+static NEXT_NOTIFICATION_ID: AtomicU64 = AtomicU64::new(1);
+
+pub async fn notify_documents_changed(
+    project: &Path,
+    path: &str,
+    change_kind: DocumentChangeKind,
+) -> GraphRefreshOutcome {
+    let path = match validate_changed_path(project, path) {
+        Ok(path) => path,
+        Err(error) => return rejected_refresh(error.to_string(), String::new()),
+    };
+    send_control_request(
+        project,
+        "documents_changed",
+        Some(NEXT_NOTIFICATION_ID.fetch_add(1, Ordering::Relaxed)),
+        Some(path),
+        Some(change_kind),
+    )
+    .await
+}
+
+pub async fn graph_refresh_status(project: &Path) -> GraphRefreshOutcome {
+    send_control_request(project, "refresh_status", None, None, None).await
+}
+
+async fn send_control_request(
+    project: &Path,
+    operation: &str,
+    notification_id: Option<u64>,
+    path: Option<String>,
+    change_kind: Option<DocumentChangeKind>,
+) -> GraphRefreshOutcome {
     let project = match project.canonicalize() {
         Ok(project) => project,
         Err(error) => return GraphRefreshOutcome::not_running(error.to_string()),
@@ -452,18 +707,27 @@ pub async fn notify_documents_changed(project: &Path) -> GraphRefreshOutcome {
     };
     if metadata.project != project.to_string_lossy() || metadata.project_id != expected_id {
         return GraphRefreshOutcome {
-            status: GraphRefreshStatus::Failed,
+            status: GraphRefreshStatus::Rejected,
+            notification_id,
+            affected_paths: path.into_iter().collect(),
             previous_revision: None,
             active_revision: None,
             diagnostic: Some("MCP control metadata belongs to another project".into()),
+            queued_at_epoch_ms: None,
+            started_at_epoch_ms: None,
+            completed_at_epoch_ms: Some(now_epoch_ms()),
         };
     }
     let response = async {
         let mut stream = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, metadata.port)).await?;
         let request = ControlRequest {
-            operation: "documents_changed".into(),
+            version: 1,
+            operation: operation.into(),
             project_id: expected_id,
             token: metadata.token,
+            notification_id,
+            path,
+            change_kind,
         };
         stream
             .write_all(&serde_json::to_vec(&request).unwrap())
@@ -481,9 +745,14 @@ pub async fn notify_documents_changed(project: &Path) -> GraphRefreshOutcome {
         }
         Err(_) => GraphRefreshOutcome {
             status: GraphRefreshStatus::Failed,
+            notification_id,
+            affected_paths: Vec::new(),
             previous_revision: None,
             active_revision: None,
             diagnostic: Some("project MCP graph refresh timed out".into()),
+            queued_at_epoch_ms: None,
+            started_at_epoch_ms: None,
+            completed_at_epoch_ms: Some(now_epoch_ms()),
         },
     }
 }
@@ -648,12 +917,15 @@ mod tests {
             "# Checkout\nValidate a newly required contract parameter.",
         )
         .unwrap();
-        let refreshed = notify_documents_changed(directory.path()).await;
+        let refreshed = notify_documents_changed(
+            directory.path(),
+            "docs/Checkout.md",
+            DocumentChangeKind::Replaced,
+        )
+        .await;
+        assert_eq!(refreshed.status, GraphRefreshStatus::Queued);
+        let refreshed = wait_for_refresh(&server).await;
         assert_eq!(refreshed.status, GraphRefreshStatus::Updated);
-        assert_eq!(
-            refreshed.previous_revision.as_deref(),
-            Some(initial.as_str())
-        );
         let updated = server.summary().await.revision;
         assert_ne!(updated, initial);
 
@@ -662,7 +934,11 @@ mod tests {
             r#"<cmmn:definitions xmlns:cmmn="x" id="D"><cmmn:task id="Keep"/><cmmn:association id="Stale" sourceRef="Deleted" targetRef="Keep"/></cmmn:definitions>"#,
         )
         .unwrap();
-        let warned = notify_documents_changed(directory.path()).await;
+        let warned =
+            notify_documents_changed(directory.path(), "main.cmmn", DocumentChangeKind::Replaced)
+                .await;
+        assert_eq!(warned.status, GraphRefreshStatus::Queued);
+        let warned = wait_for_refresh(&server).await;
         assert_eq!(warned.status, GraphRefreshStatus::Updated);
         assert!(
             warned
@@ -671,26 +947,33 @@ mod tests {
                 .is_some_and(|message| message.contains("skipped edge Stale"))
         );
         assert_eq!(server.summary().await.entities, 2);
+        let before_coalesced = server.summary().await.revision;
 
         fs::write(
-            directory.path().join("schematics/docs/Checkout.md"),
+            directory.path().join("schematics/main.md"),
             "# Checkout\nThe newest durable contract wins overlapping refreshes.",
         )
         .unwrap();
         let (first, second) = tokio::join!(
-            notify_documents_changed(directory.path()),
-            notify_documents_changed(directory.path())
+            notify_documents_changed(directory.path(), "main.md", DocumentChangeKind::Replaced),
+            notify_documents_changed(directory.path(), "main.md", DocumentChangeKind::Replaced)
         );
-        assert_ne!(first.status, GraphRefreshStatus::Failed);
-        assert_ne!(second.status, GraphRefreshStatus::Failed);
+        assert_eq!(first.status, GraphRefreshStatus::Queued);
+        assert_eq!(second.status, GraphRefreshStatus::Queued);
+        let coalesced = wait_for_refresh(&server).await;
+        assert!(matches!(
+            coalesced.status,
+            GraphRefreshStatus::Updated | GraphRefreshStatus::Unchanged
+        ));
         let updated = server.summary().await.revision;
-        assert_eq!(
-            first.active_revision.as_deref(),
-            second.active_revision.as_deref()
-        );
+        assert_ne!(updated, before_coalesced);
 
         fs::write(directory.path().join("schematics/main.cmmn"), "<broken>").unwrap();
-        let failed = notify_documents_changed(directory.path()).await;
+        let failed =
+            notify_documents_changed(directory.path(), "main.cmmn", DocumentChangeKind::Replaced)
+                .await;
+        assert_eq!(failed.status, GraphRefreshStatus::Queued);
+        let failed = wait_for_refresh(&server).await;
         assert_eq!(failed.status, GraphRefreshStatus::Failed);
         assert_eq!(failed.active_revision.as_deref(), Some(updated.as_str()));
         assert_eq!(server.summary().await.revision, updated);
@@ -701,12 +984,16 @@ mod tests {
     #[tokio::test]
     async fn notification_is_project_bound_and_missing_mcp_is_non_fatal() {
         let directory = fixture();
-        let missing = notify_documents_changed(directory.path()).await;
+        let missing =
+            notify_documents_changed(directory.path(), "main.cmmn", DocumentChangeKind::Replaced)
+                .await;
         assert_eq!(missing.status, GraphRefreshStatus::NotRunning);
 
         fs::create_dir_all(directory.path().join(".ss/run")).unwrap();
         fs::write(control_path(directory.path()), b"stale metadata").unwrap();
-        let stale = notify_documents_changed(directory.path()).await;
+        let stale =
+            notify_documents_changed(directory.path(), "main.cmmn", DocumentChangeKind::Replaced)
+                .await;
         assert_eq!(stale.status, GraphRefreshStatus::NotRunning);
         assert!(
             stale
@@ -723,8 +1010,75 @@ mod tests {
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         metadata.project_id = "another-project".into();
         fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
-        let rejected = notify_documents_changed(directory.path()).await;
-        assert_eq!(rejected.status, GraphRefreshStatus::Failed);
+        let rejected =
+            notify_documents_changed(directory.path(), "main.cmmn", DocumentChangeKind::Replaced)
+                .await;
+        assert_eq!(rejected.status, GraphRefreshStatus::Rejected);
         assert!(rejected.diagnostic.unwrap().contains("another project"));
+    }
+
+    #[test]
+    fn changed_paths_are_confined_and_supported() {
+        let directory = fixture();
+        assert_eq!(
+            validate_changed_path(directory.path(), "docs/Checkout.md").unwrap(),
+            "docs/Checkout.md"
+        );
+        assert!(validate_changed_path(directory.path(), "../secret.md").is_err());
+        assert!(validate_changed_path(directory.path(), "/tmp/secret.md").is_err());
+        assert!(validate_changed_path(directory.path(), "main.txt").is_err());
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            fs::write(outside.path().join("secret.md"), "secret").unwrap();
+            std::os::unix::fs::symlink(outside.path(), directory.path().join("schematics/escape"))
+                .unwrap();
+            assert!(validate_changed_path(directory.path(), "escape/secret.md").is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn enqueue_does_not_wait_for_a_slow_graph_build() {
+        let directory = fixture();
+        let mut options = LoadOptions::deterministic_test();
+        options.refresh_delay = std::time::Duration::from_millis(250);
+        let server = SchematicMcp::load(directory.path(), options).unwrap();
+        fs::write(
+            directory.path().join("schematics/main.md"),
+            "# Slow build\nThe save acknowledgement stays fast.",
+        )
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let outcome = server
+            .enqueue_refresh(42, "main.md".into(), DocumentChangeKind::Replaced)
+            .await;
+        assert_eq!(outcome.status, GraphRefreshStatus::Queued);
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        assert!(matches!(
+            server.refresh_status().await.status,
+            GraphRefreshStatus::Queued | GraphRefreshStatus::Processing
+        ));
+        assert_eq!(
+            wait_for_refresh(&server).await.status,
+            GraphRefreshStatus::Updated
+        );
+    }
+
+    async fn wait_for_refresh(server: &SchematicMcp) -> GraphRefreshOutcome {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let status = server.refresh_status().await;
+                if !matches!(
+                    status.status,
+                    GraphRefreshStatus::Queued | GraphRefreshStatus::Processing
+                ) {
+                    return status;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background graph refresh timed out")
     }
 }
