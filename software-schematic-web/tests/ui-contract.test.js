@@ -6,19 +6,130 @@ const root = resolve(import.meta.dirname, '..');
 const html = readFileSync(resolve(root, 'index.html'), 'utf8');
 const css = readFileSync(resolve(root, 'src/styles.css'), 'utf8');
 const main = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+const assistantProtocol = readFileSync(resolve(root, 'src/assistant.js'), 'utf8');
 const adapters = readFileSync(resolve(root, 'src/diagram-adapters.ts'), 'utf8');
+const statusRendering = readFileSync(resolve(root, 'src/status-rendering.js'), 'utf8');
+const saveStatus = readFileSync(resolve(root, 'src/save-status.js'), 'utf8');
 
 describe('browser workspace contract', () => {
   it('uses the defined status renderer when applying assistant status operations', () => {
-    expect(main).toContain("operation.type === 'set_node_status'");
-    expect(main).toContain('applyNodeStatus(tab, element)');
-    expect(main).not.toContain('applyStatusMarker(');
+    expect(assistantProtocol).toContain("operation.type === 'set_node_status'");
+    expect(main).toContain('renderStatus: applyNodeStatus');
+    expect(`${main}\n${assistantProtocol}`).not.toContain('applyStatusMarker(');
+  });
+
+  it('hydrates status presentation after initial import and every existing-tab reimport', () => {
+    expect(main).toContain('imported = await adapter.importXML(xml)');
+    expect(main).toContain('hydrateNodeStatuses(tab)');
+    expect(main.match(/adapter\.importXML\(/g)).toHaveLength(1);
+    expect(main.match(/importTabXML\(/g)).toHaveLength(4);
+    expect(statusRendering).toContain('const imported = await tab.adapter.importXML(xml)');
+    expect(statusRendering).toContain('hydrateNodeStatuses(tab)');
   });
 
   it('contains retained diagram, metadata, documentation, and autosave surfaces', () => {
     for (const id of ['tabs', 'breadcrumbs', 'canvases', 'element-id', 'element-label', 'element-type', 'element-name', 'node-status', 'markdown-rendered', 'markdown-source', 'save-status']) {
       expect(html).toContain(`id="${id}"`);
     }
+  });
+
+  it('makes Play create a scoped semantic-versioned plan after every pending save', () => {
+    expect(html).toContain('id="play-build"');
+    expect(html).toContain('id="build-status"');
+    expect(html).toContain('id="build-version-controls"');
+    for (const bump of ['major', 'minor', 'fix']) expect(html).toContain(`data-build-bump="${bump}"`);
+    expect(html).toContain('Build code from the current model');
+    expect(css).toContain('.play-button');
+    expect(main).toContain('for (const tab of tabs.values()) await flushDiagram(tab)');
+    expect(main).toContain('await queue.waitForAll()');
+    expect(main).toContain('await publishBrowserSession()');
+    expect(main).toContain("api(runtimePath('/api/runtime/build-plans')");
+    expect(main).toContain('semanticBump: selectedBuildBump');
+    expect(main).toContain('currentBuildRequest.manifest.scopeLabel');
+    expect(main).toContain('currentBuildRequest.manifest.version');
+  });
+
+  it('shows generated implementation contracts separately with persistent drift status', () => {
+    expect(html).toContain('id="implementation-contract"');
+    expect(html).toContain('id="contract-drift"');
+    expect(main).toContain("'-contract.md'");
+    expect(main).toContain('Differs from logical design');
+    expect(css).toContain('.contract-drift');
+  });
+
+  it('discovers and verifies the editor operation registry before diagram assistance', () => {
+    expect(main).toContain("api('/api/assistant/capabilities')");
+    expect(main).toContain('assistantCapabilities.version !== ASSISTANT_SCHEMA_VERSION');
+    expect(main).toContain('Diagram assistant operation registry does not match the editor');
+  });
+
+  it('opens chat-originated proposals in the shared preview and revalidates before approval', () => {
+    expect(main).toContain("api('/api/assistant/inbox')");
+    expect(main).toContain('await reviewSubmittedProposal(inbox[0])');
+    expect(main).toContain('assistant.proposal = validateProposal(submission.proposal, snapshot)');
+    expect(main).toContain('approveProposal(assistant.proposal, assistant.snapshot, current.sourceRevision)');
+    expect(main).toContain("api('/api/assistant/inbox-dismissals'");
+  });
+
+  it('uses fresh two-phase assistant invocations with explicit suggestion generation', () => {
+    for (const id of ['assistant-thread', 'assistant-transcript', 'assistant-prompt', 'assistant-submit', 'assistant-preview', 'assistant-close']) expect(html).toContain(`id="${id}"`);
+    expect(main).toContain("api('/api/assistant/conversations'");
+    expect(main).toContain("api('/api/assistant/proposals'");
+    expect(main).toContain("setAssistantPhase('interview')");
+    expect(main).toContain("setAssistantPhase('preview')");
+    expect(main).toContain("role: 'proposalSummary'");
+    expect(main).toContain("suggest.id = 'assistant-suggest'");
+    expect(main).toContain("continueButton.id = 'assistant-continue'");
+    expect(main).toContain("approveButton.id = 'assistant-approve'");
+    expect(main).not.toContain('localStorage');
+    expect(main).not.toContain('assistantInterviewKey');
+    expect(html).not.toContain('id="assistant-cancel"');
+    expect(html).not.toContain('id="assistant-reject"');
+  });
+
+  it('keeps a responsive chat composer anchored below an independently scrolling transcript', () => {
+    expect(html).toContain('class="assistant-composer-wrap"');
+    expect(html).toContain('class="assistant-send-button"');
+    expect(html).toContain('Enter to send · Shift+Enter for a new line');
+    expect(css).toMatch(/\.assistant-dialog\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\) auto/);
+    expect(css).toMatch(/\.assistant-thread\s*\{[^}]*overflow-y:\s*auto/);
+    expect(css).toMatch(/\.assistant-composer-wrap\s*\{[^}]*border-top:/);
+    expect(css).toContain('@media (max-width: 720px), (max-height: 640px)');
+  });
+
+  it('uses an accessible corner control for send and stop with guarded keyboard submission', () => {
+    expect(html).toContain('title="Send message" aria-label="Send message"');
+    expect(css).toMatch(/\.assistant-send-button\s*\{[^}]*position:\s*absolute[^}]*width:\s*42px[^}]*height:\s*42px/);
+    expect(main).toContain("submit.dataset.mode = stopping ? 'stop' : 'send'");
+    expect(main).toContain("submit.title = stopping ? 'Stop generating' : 'Send message'");
+    expect(main).toContain("replaceIcon(submit, stopping ? 'square' : 'arrow-up')");
+    expect(main).toContain('assistantComposerIntent(event, event.currentTarget.value, assistant.phase)');
+    expect(main).toContain("if (intent === 'send')");
+    expect(main).toContain("intent === 'empty'");
+    expect(main).toContain('controller?.abort()');
+  });
+
+  it('places suggestion actions under responses and proposals inline in outlined cards', () => {
+    expect(main).toContain("suggest.innerHTML = '<i data-lucide=\"sparkles\"></i><span>Suggest changes</span>'");
+    expect(main).toContain("title.textContent = 'Suggested updates'");
+    expect(main).toContain("actions.className = 'assistant-preview-actions'");
+    expect(main).toContain("continueButton.textContent = 'Continue interview'");
+    expect(main).toContain("approveButton.textContent = 'Approve changes'");
+    expect(css).toMatch(/\.assistant-preview\s*\{[^}]*border:\s*1px solid/);
+    expect(css).toContain('.assistant-response-actions');
+    expect(css).toContain('.assistant-preview-actions');
+  });
+
+  it('preserves local work and requires an explicit revision-conflict resolution', () => {
+    expect(html).toContain('id="revision-conflict"');
+    expect(html).toContain('id="conflict-reload"');
+    expect(html).toContain('id="conflict-reapply"');
+    expect(html).toContain('id="revision-conflict-preview"');
+    expect(main).toContain("detail?.code === 'revisionConflict'");
+    expect(main).toContain('conflict.localContent');
+    expect(main).toContain('await readFile(conflict.path)');
+    expect(main).toContain('await queue.enqueue(conflict.path, conflict.localContent)');
+    expect(main).toContain('mergeMarkdown(error.baseContent, error.localContent, current.content)');
   });
 
   it('exposes one Name and no derived identity or documentation path fields', () => {
@@ -86,9 +197,9 @@ describe('browser workspace contract', () => {
     expect(main).toContain('tab.adapter.destroy()');
     expect(main).toContain('tab.nodeStatuses.clear()');
     expect(main).toContain("projectAnchorPath = selectProjectAnchor(await api('/api/diagrams'))");
-    expect(main).toContain("Saved; graph updated");
-    expect(main).toContain("Saved; MCP not running");
-    expect(main).toContain("Saved; graph update failed");
+    expect(saveStatus).toContain("Saved; graph updated");
+    expect(saveStatus).toContain("Saved; MCP not running");
+    expect(saveStatus).toContain("Saved; graph update failed");
     expect(main).toContain('await openDiagram(projectAnchorPath)');
   });
 
@@ -126,7 +237,7 @@ describe('browser workspace contract', () => {
     expect(main).toContain('activeTab.nodeStatuses.set(selectedElement.id, status)');
     expect(main).toContain('activeTab.adapter.updateStatus(selectedElement, status)');
     expect(adapters).toContain('implementationStatus: normalizeNodeStatus(status)');
-    expect(main).toContain("gfx?.setAttribute('aria-label'");
+    expect(statusRendering).toContain("gfx?.setAttribute('aria-label'");
     expect(main).not.toContain('!element.waypoints && !element.labelTarget');
   });
 
@@ -135,10 +246,22 @@ describe('browser workspace contract', () => {
   });
 
   it('keeps CMMN assistant approval transactional and supports explicit revert', () => {
-    expect(main).toContain('const before = { diagrams: new Map(), documents: new Map()');
-    expect(main).toContain("for (const [path, xml] of before.diagrams) if (xml && tabs.has(path)) await tabs.get(path).adapter.importXML(xml)");
+    expect(assistantProtocol).toContain('createdCompositions: []');
+    expect(assistantProtocol).toContain('openedTabs: []');
+    expect(assistantProtocol).toContain('processRenames: []');
+    expect(main).toContain('async function rollbackAssistantChange');
+    expect(main).toContain("api('/api/schematic-revision')");
+    expect(main).toContain("api('/api/file-deletes'");
+    expect(main).toContain("api('/api/composition-reverts'");
+    expect(assistantProtocol).toContain('The schematic changed after this assistant proposal');
     expect(main).toContain("$('#assistant-revert').addEventListener('click'");
     expect(main).toContain("showToast('Assistant change reverted')");
+    for (const operation of [
+      'replace_node_type', 'update_node_label', 'update_node_name', 'set_node_status', 'set_process_reference',
+      'create_process', 'open_process', 'rename_process', 'add_flow_node', 'connect_sequence_flow',
+      'add_participant', 'connect_message_flow', 'move_element', 'remove_element', 'disconnect_flow',
+      'add_plan_item', 'connect_cmmn', 'replace_diagram_markdown', 'replace_node_markdown', 'replace_edge_markdown',
+    ]) expect(`${main}\n${assistantProtocol}`).toContain(`'${operation}'`);
   });
 
   it('cleans up a partially initialized modeler when diagram import fails', () => {

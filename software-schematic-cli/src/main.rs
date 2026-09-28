@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
 use software_schematic_cli::{
     Result, assistant_auth_login, assistant_auth_logout, assistant_auth_status,
-    backfill_embeddings, init_project, schematic_mcp::serve_mcp, serve, update_project,
+    backfill_embeddings, doctor_project, init_project, schematic_mcp::serve_mcp, serve,
+    update_project,
 };
 use std::path::PathBuf;
 
@@ -45,6 +46,18 @@ enum Command {
     },
     /// Refresh the pinned runtime and project-local Codex integration.
     Update {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Diagnose or repair the project-local daemon, MCP, and skill integration.
+    Doctor {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        repair: bool,
+    },
+    /// Stop the active project daemon without changing authored files.
+    Stop {
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
@@ -93,6 +106,23 @@ async fn main() -> Result<()> {
                 "Software Schematic {} updated in {}",
                 env!("CARGO_PKG_VERSION"),
                 layout.project.display()
+            );
+        }
+        Command::Doctor { project, repair } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&doctor_project(project, repair)?).unwrap()
+            );
+        }
+        Command::Stop { project } => {
+            let stopped = software_schematic_cli::project_runtime::stop_daemon(&project)?;
+            println!(
+                "{}",
+                if stopped {
+                    "Software Schematic daemon stopped."
+                } else {
+                    "Software Schematic daemon was not running."
+                }
             );
         }
     }

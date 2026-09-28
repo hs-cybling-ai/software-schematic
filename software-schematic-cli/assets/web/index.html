@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <title>Software Schematic</title>
-    <script type="module" crossorigin src="./vendor/index-BwyR5uzv.js"></script>
-    <link rel="stylesheet" crossorigin href="./vendor/index-CzTVA34p.css">
+    <script type="module" crossorigin src="./vendor/index-D8KYeuwk.js"></script>
+    <link rel="stylesheet" crossorigin href="./vendor/index-BKIRNyR0.css">
   </head>
   <body>
     <div id="app" class="app-shell">
@@ -16,10 +16,21 @@
           <button id="new-cmmn" class="secondary-button compact" title="Create or open a CMMN business anchor">New CMMN anchor</button>
           <button id="return-to-anchor" class="secondary-button compact hidden" title="Return to the originating CMMN business need">Return to business need</button>
           <button id="assistant-revert" class="secondary-button compact hidden" title="Revert the most recent assistant change">Revert assistant change</button>
+          <div id="build-version-controls" class="build-version-controls hidden" role="group" aria-label="Build plan version change">
+            <button type="button" data-build-bump="major" title="Breaking scope or contract change">Major</button>
+            <button type="button" data-build-bump="minor" title="Backward-compatible scoped capability">Minor</button>
+            <button type="button" data-build-bump="fix" title="Scoped correction">Fix</button>
+          </div>
+          <button id="play-build" class="play-button" title="Build code from the current model"><span aria-hidden="true">▶</span><span>Play</span></button>
+          <div id="build-status" class="build-status designing" role="status">Designing</div>
           <button id="fit-view" class="icon-button" title="Enter full screen" aria-label="Enter full screen" aria-pressed="false"><i data-lucide="maximize-2"></i></button>
           <div id="save-status" class="save-status saved" role="status"><span class="status-dot"></span><span>Saved</span></div>
         </div>
       </header>
+      <section id="revision-conflict" class="conflict-banner hidden" role="alert" aria-labelledby="revision-conflict-title">
+        <div><strong id="revision-conflict-title">This document changed outside the editor</strong><p id="revision-conflict-detail"></p><pre id="revision-conflict-preview" class="conflict-preview hidden" aria-label="Merged Markdown preview"></pre></div>
+        <div class="conflict-actions"><button id="conflict-reload" class="secondary-button compact">Reload current</button><button id="conflict-reapply" class="primary-button compact">Reapply local changes</button></div>
+      </section>
       <main class="workspace">
         <section class="diagram-panel" aria-label="Diagram editor">
           <div id="tabs" class="tabs" role="tablist"></div>
@@ -45,6 +56,10 @@
             </div>
             <div id="markdown-rendered" class="markdown-body"></div>
             <textarea id="markdown-source" class="markdown-source hidden" spellcheck="true" aria-label="Markdown source"></textarea>
+            <section id="implementation-contract" class="implementation-contract hidden" aria-labelledby="implementation-contract-title">
+              <div class="implementation-contract-heading"><span id="implementation-contract-title">Implemented contract</span><span id="contract-drift" class="contract-drift" role="status"></span></div>
+              <div id="implementation-contract-body" class="markdown-body"></div>
+            </section>
           </section>
         </aside>
       </main>
@@ -61,13 +76,24 @@
       </div>
       <div id="assistant-modal" class="modal-backdrop hidden" role="presentation">
         <section class="assistant-dialog" role="dialog" aria-modal="true" aria-labelledby="assistant-title">
-          <header class="assistant-header"><div><div class="eyebrow">AI assistant</div><h2 id="assistant-title">Suggest diagram changes</h2></div><button id="assistant-close" class="icon-button" aria-label="Close assistant"><i data-lucide="x"></i></button></header>
-          <p id="assistant-scope" class="assistant-scope"></p>
-          <p id="assistant-disclosure" class="assistant-disclosure">The selected provider receives active diagram structure and relevant Markdown. No credential is sent to the browser.</p>
-          <label class="assistant-prompt"><span>What should change?</span><textarea id="assistant-prompt" rows="5" placeholder="For example: turn this task into a subprocess and add four ordered steps."></textarea></label>
-          <div id="assistant-error" class="assistant-error hidden" role="alert"></div>
-          <div id="assistant-preview" class="assistant-preview hidden" aria-live="polite"></div>
-          <footer class="assistant-actions"><button id="assistant-cancel" class="secondary-button">Cancel</button><button id="assistant-reject" class="secondary-button hidden">Reject</button><button id="assistant-submit" class="primary-button">Generate proposal</button><button id="assistant-approve" class="primary-button hidden">Approve changes</button></footer>
+          <header class="assistant-header"><div><div class="eyebrow">Design interview</div><h2 id="assistant-title">Continue diagram design</h2></div><button id="assistant-close" type="button" class="icon-button" title="Close assistant" aria-label="Close assistant"><i data-lucide="x"></i></button></header>
+          <div class="assistant-context">
+            <p id="assistant-scope" class="assistant-scope"></p>
+            <p id="assistant-disclosure" class="assistant-disclosure">The selected provider receives active diagram structure and relevant Markdown. No credential is sent to the browser.</p>
+          </div>
+          <div id="assistant-thread" class="assistant-thread" tabindex="-1">
+            <div id="assistant-transcript" class="assistant-transcript" aria-live="polite"></div>
+            <div id="assistant-error" class="assistant-error hidden" role="alert"></div>
+            <section id="assistant-preview" class="assistant-preview hidden" aria-live="polite" aria-labelledby="assistant-preview-title"></section>
+          </div>
+          <div class="assistant-composer-wrap">
+            <label class="assistant-composer">
+              <span class="visually-hidden">Continue the interview</span>
+              <textarea id="assistant-prompt" rows="3" placeholder="Message the design assistant" aria-describedby="assistant-composer-help"></textarea>
+              <button id="assistant-submit" type="button" class="assistant-send-button" title="Send message" aria-label="Send message" disabled><i data-lucide="arrow-up"></i></button>
+            </label>
+            <span id="assistant-composer-help" class="assistant-composer-help">Enter to send · Shift+Enter for a new line</span>
+          </div>
         </section>
       </div>
     </div>

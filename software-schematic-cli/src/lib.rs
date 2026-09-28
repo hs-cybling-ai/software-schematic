@@ -1,13 +1,16 @@
 use axum::{
     Json, Router,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, Extension},
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 pub mod assistant;
+pub mod delivery_protocol;
+pub mod delivery_runtime;
 pub mod embedding_document;
+pub mod project_runtime;
 pub mod schematic_graph;
 pub mod schematic_mcp;
 use include_dir::{Dir, include_dir};
@@ -30,11 +33,11 @@ const AGENTS_END: &str = "<!-- software-schematic:end -->";
 const AGENTS_GUIDANCE: &str = r#"<!-- software-schematic:begin -->
 ## Software Schematic development
 
-Treat the project schematic graph as the source of software contracts. Before proposing or implementing a change, call the project-local `software_schematic` MCP server and resolve the request's natural language to a development root. Record the resolved root URN in the concise OpenSpec-style proposal. Do not duplicate detailed contracts in proposal or spec prose; put them in diagram Documentation.
+Treat the Software Schematic diagram as the source of software contracts. Use the project-local `design` skill for a deep interview with frequent small visual proposals. Let the developer adjust the diagram directly, then read those edits before continuing the interview.
 
-Every implementation task must include `nodeRefs` containing the universal URNs of the diagram entities it changes. Only entities whose persisted Implementation Status is `new` (green) or `modify` (orange) are authorized for implementation. Use graph lookup and neighborhood tools to understand relationships and source citations.
+Do not start implementation until a versioned plan exists. The developer can click Play for the current browser selection or invoke `plan` with a natural-language node or label; both use the same planner. Then use `build` to select an open plan and implement one claimed work item at a time. Only model elements marked `new` or `modify` are buildable; `open` and `locked` items are context.
 
-Software Schematic MCP tools are query-only. Never mutate or refresh the graph, diagrams, Documentation, Implementation Status, or source contracts from Codex. If a contract is missing or incorrect, stop and ask the user to evaluate and save the change in the Software Schematic web application; a successful human-authored save refreshes the running graph.
+If the diagram changes during a build, stop and create or resume a plan for the newly published model. The saved diagram is the logical contract; generated edge/event implementation contracts may record justified physical differences without expanding feature scope. Do not create a second specification, orchestration script, or raw XML edit.
 <!-- software-schematic:end -->"#;
 
 pub fn validate_package_name(value: &str) -> Result<&str> {
@@ -140,8 +143,8 @@ const STARTER_MD: &str = include_str!("../assets/starter.md");
 const PROJECT_LICENSE: &str = include_str!("../../LICENSE");
 const PROJECT_NOTICE: &str = include_str!("../../NOTICE");
 const THIRD_PARTY_NOTICES: &str = include_str!("../../THIRD_PARTY_NOTICES.md");
-const MAC_WRAPPER: &str = "#!/bin/sh\nset -eu\nSCRIPT_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\ncase \"${1:-}\" in\n  auth) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" auth --project \"$SCRIPT_DIR\" \"$@\" ;;\n  embeddings) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" embeddings --project \"$SCRIPT_DIR\" \"$@\" ;;\n  mcp) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" mcp --project \"$SCRIPT_DIR\" \"$@\" ;;\n  update) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" update --project \"$SCRIPT_DIR\" \"$@\" ;;\nesac\nexec \"$SCRIPT_DIR/.ss/bin/ss\" serve --project \"$SCRIPT_DIR\" \"$@\"\n";
-const WINDOWS_WRAPPER: &str = "@echo off\r\nsetlocal\r\nif \"%~1\"==\"auth\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" auth --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"embeddings\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" embeddings --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"mcp\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" mcp --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"update\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" update --project \"%~dp0\" %*\r\n) else (\r\n  \"%~dp0.ss\\bin\\ss.exe\" serve --project \"%~dp0\" %*\r\n)\r\n";
+const MAC_WRAPPER: &str = "#!/bin/sh\nset -eu\nSCRIPT_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\ncase \"${1:-}\" in\n  auth) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" auth --project \"$SCRIPT_DIR\" \"$@\" ;;\n  doctor) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" doctor --project \"$SCRIPT_DIR\" \"$@\" ;;\n  stop) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" stop --project \"$SCRIPT_DIR\" \"$@\" ;;\n  embeddings) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" embeddings --project \"$SCRIPT_DIR\" \"$@\" ;;\n  mcp) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" mcp --project \"$SCRIPT_DIR\" \"$@\" ;;\n  update) shift; exec \"$SCRIPT_DIR/.ss/bin/ss\" update --project \"$SCRIPT_DIR\" \"$@\" ;;\nesac\nexec \"$SCRIPT_DIR/.ss/bin/ss\" serve --project \"$SCRIPT_DIR\" \"$@\"\n";
+const WINDOWS_WRAPPER: &str = "@echo off\r\nsetlocal\r\nif \"%~1\"==\"auth\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" auth --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"doctor\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" doctor --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"stop\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" stop --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"embeddings\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" embeddings --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"mcp\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" mcp --project \"%~dp0\" %*\r\n) else if \"%~1\"==\"update\" (\r\n  shift\r\n  \"%~dp0.ss\\bin\\ss.exe\" update --project \"%~dp0\" %*\r\n) else (\r\n  \"%~dp0.ss\\bin\\ss.exe\" serve --project \"%~dp0\" %*\r\n)\r\n";
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -153,22 +156,39 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     WalkDir(#[from] walkdir::Error),
+    #[error("document revision conflict for {path}: expected {expected}, current {current}")]
+    RevisionConflict {
+        path: String,
+        expected: String,
+        current: String,
+    },
 }
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = match self {
+            Error::RevisionConflict { .. } => StatusCode::CONFLICT,
             Error::Message(_) => StatusCode::BAD_REQUEST,
             Error::Io(ref value) if value.kind() == std::io::ErrorKind::NotFound => {
                 StatusCode::NOT_FOUND
             }
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (
-            status,
-            Json(serde_json::json!({ "error": self.to_string() })),
-        )
-            .into_response()
+        let body = match &self {
+            Error::RevisionConflict {
+                path,
+                expected,
+                current,
+            } => serde_json::json!({
+                "error": self.to_string(),
+                "code": "revisionConflict",
+                "path": path,
+                "expectedRevision": expected,
+                "currentRevision": current,
+            }),
+            _ => serde_json::json!({ "error": self.to_string() }),
+        };
+        (status, Json(body)).into_response()
     }
 }
 
@@ -228,18 +248,11 @@ pub fn init_project(project: impl AsRef<Path>) -> Result<ProjectLayout> {
     fs::write(project.join("ssw.cmd"), WINDOWS_WRAPPER)?;
     write_project_id(&tool, &project)?;
     update_managed_project_files(&project)?;
-
-    let current_exe = std::env::current_exe()?;
-    let runtime_name = if cfg!(windows) { "ss.exe" } else { "ss" };
-    fs::copy(current_exe, tool.join("bin").join(runtime_name))?;
+    install_runtime_binary(&tool)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(project.join("ssw"), fs::Permissions::from_mode(0o755))?;
-        fs::set_permissions(
-            tool.join("bin").join(runtime_name),
-            fs::Permissions::from_mode(0o755),
-        )?;
     }
     Ok(ProjectLayout {
         project,
@@ -280,23 +293,56 @@ pub fn update_project(project: impl AsRef<Path>) -> Result<ProjectLayout> {
     fs::write(project.join("ssw.cmd"), WINDOWS_WRAPPER)?;
     write_project_id(&tool, &project)?;
     update_managed_project_files(&project)?;
-    let current_exe = std::env::current_exe()?;
-    let runtime_name = if cfg!(windows) { "ss.exe" } else { "ss" };
-    fs::copy(current_exe, tool.join("bin").join(runtime_name))?;
+    install_runtime_binary(&tool)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(project.join("ssw"), fs::Permissions::from_mode(0o755))?;
-        fs::set_permissions(
-            tool.join("bin").join(runtime_name),
-            fs::Permissions::from_mode(0o755),
-        )?;
     }
     Ok(ProjectLayout {
         project,
         tool,
         schematics,
     })
+}
+
+fn install_runtime_binary(tool: &Path) -> Result<PathBuf> {
+    let source = std::env::current_exe()?;
+    let runtime_name = if cfg!(windows) { "ss.exe" } else { "ss" };
+    let destination = tool.join("bin").join(runtime_name);
+    let temporary = tool
+        .join("bin")
+        .join(format!(".{runtime_name}.{}.tmp", std::process::id()));
+    if temporary.exists() {
+        fs::remove_file(&temporary)?;
+    }
+    fs::copy(source, &temporary)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))?;
+        fs::rename(&temporary, &destination)?;
+    }
+    #[cfg(windows)]
+    {
+        let backup = tool.join("bin").join(format!(".{runtime_name}.previous"));
+        if backup.exists() {
+            fs::remove_file(&backup)?;
+        }
+        if destination.exists() {
+            fs::rename(&destination, &backup)?;
+        }
+        if let Err(error) = fs::rename(&temporary, &destination) {
+            if backup.exists() {
+                let _ = fs::rename(&backup, &destination);
+            }
+            return Err(error.into());
+        }
+        if backup.exists() {
+            fs::remove_file(backup)?;
+        }
+    }
+    Ok(destination)
 }
 
 fn write_project_id(tool: &Path, project: &Path) -> Result<()> {
@@ -319,8 +365,89 @@ fn write_project_id(tool: &Path, project: &Path) -> Result<()> {
 }
 
 fn update_managed_project_files(project: &Path) -> Result<()> {
+    fs::create_dir_all(project.join(".ss/run"))?;
+    fs::create_dir_all(project.join(".ss/workflows/proposals"))?;
+    fs::create_dir_all(project.join(".ss/workflows/interviews"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(project.join(".ss/run"), fs::Permissions::from_mode(0o700))?;
+    }
     update_agents(project)?;
-    update_codex_config(project)
+    update_codex_config(project)?;
+    delivery_runtime::install_skill_adapters(project)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorReport {
+    pub status: String,
+    pub project_id: String,
+    pub daemon: String,
+    pub managed_integrations: String,
+    pub repaired: bool,
+}
+
+pub fn doctor_project(project: impl AsRef<Path>, repair: bool) -> Result<DoctorReport> {
+    let project = absolute(project.as_ref())?.canonicalize()?;
+    if repair {
+        let _ = project_runtime::DaemonOwnership::reclaim_stale(&project)?;
+        update_managed_project_files(&project)?;
+        fs::write(
+            project.join(".ss/version"),
+            format!("{}\n", env!("CARGO_PKG_VERSION")),
+        )?;
+    }
+    let project_id = fs::read_to_string(project.join(".ss/project-id"))?
+        .trim()
+        .to_owned();
+    if project_id.is_empty() {
+        return Err(Error::Message(".ss/project-id is empty".into()));
+    }
+    let skills = ["design", "plan", "build"];
+    let codex_config = fs::read_to_string(project.join(".codex/config.toml")).unwrap_or_default();
+    let codex_managed = codex_config
+        .parse::<toml_edit::DocumentMut>()
+        .ok()
+        .is_some_and(|document| {
+            document["mcp_servers"]["software_schematic"]["command"].as_str() == Some("./ssw")
+                && document["mcp_servers"]["software_schematic"]["args"]
+                    .as_array()
+                    .is_some_and(|args| {
+                        args.len() == 1
+                            && args.get(0).and_then(|value| value.as_str()) == Some("mcp")
+                    })
+        });
+    let managed = codex_managed
+        && skills.iter().all(|name| {
+            project
+                .join(".codex/skills")
+                .join(name)
+                .join("SKILL.md")
+                .is_file()
+        })
+        && skills.iter().all(|name| {
+            project
+                .join(".claude/commands")
+                .join(format!("{name}.md"))
+                .is_file()
+        });
+    let daemon = match project_runtime::DaemonOwnership::healthy_discovery(&project)? {
+        Some(_) => "running",
+        None => "stopped",
+    };
+    Ok(DoctorReport {
+        status: if managed {
+            "ready"
+        } else {
+            "run with --repair"
+        }
+        .into(),
+        project_id,
+        daemon: daemon.into(),
+        managed_integrations: if managed { "current" } else { "missing" }.into(),
+        repaired: repair,
+    })
 }
 
 fn update_agents(project: &Path) -> Result<()> {
@@ -524,6 +651,9 @@ pub struct AppState {
     embedding_generation: Arc<AtomicU64>,
     embedding_slots: Arc<tokio::sync::Semaphore>,
     embedding_status: Arc<tokio::sync::RwLock<EmbeddingOutcome>>,
+    document_write_lock: Arc<tokio::sync::Mutex<()>>,
+    assistant_proposals: Arc<tokio::sync::RwLock<BTreeMap<String, AssistantProposalSubmission>>>,
+    graph: Option<schematic_mcp::SchematicMcp>,
 }
 
 impl AppState {
@@ -538,7 +668,36 @@ impl AppState {
             embedding_generation: Arc::new(AtomicU64::new(0)),
             embedding_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             embedding_status: Arc::new(tokio::sync::RwLock::new(EmbeddingOutcome::default())),
+            document_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            assistant_proposals: Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
+            graph: None,
         })
+    }
+
+    pub fn with_graph(mut self, graph: schematic_mcp::SchematicMcp) -> Self {
+        self.graph = Some(graph);
+        self
+    }
+
+    async fn notify_document_changed(
+        &self,
+        path: &str,
+        kind: schematic_mcp::DocumentChangeKind,
+    ) -> schematic_mcp::GraphRefreshOutcome {
+        if let Some(graph) = &self.graph {
+            graph.notify_document_changed(path, kind).await
+        } else {
+            schematic_mcp::GraphRefreshOutcome::not_running("project runtime graph is unavailable")
+        }
+    }
+
+    async fn graph_refresh_status(&self) -> schematic_mcp::GraphRefreshOutcome {
+        match &self.graph {
+            Some(graph) => graph.refresh_status_public().await,
+            None => schematic_mcp::GraphRefreshOutcome::not_running(
+                "project runtime graph is unavailable",
+            ),
+        }
     }
 
     pub fn resolve(&self, relative: &str, permit_missing: bool) -> Result<PathBuf> {
@@ -581,6 +740,72 @@ impl AppState {
         Ok(candidate)
     }
 
+    pub(crate) async fn write_generated_contract(
+        &self,
+        relative: &str,
+        physical: &str,
+        _body: &str,
+        expected_revision: &str,
+    ) -> Result<delivery_protocol::DocumentRevision> {
+        if !(relative.starts_with("docs/") || relative.contains("/docs/"))
+            || !relative.ends_with("-contract.md")
+        {
+            return Err(Error::Message(
+                "generated contracts require a derived docs/<element>-contract.md path".into(),
+            ));
+        }
+        let _write_guard = self.document_write_lock.lock().await;
+        let path = self.resolve(relative, true)?;
+        let change_kind = if path.exists() {
+            schematic_mcp::DocumentChangeKind::Replaced
+        } else {
+            schematic_mcp::DocumentChangeKind::Created
+        };
+        let current = if path.exists() {
+            let existing = tokio::fs::read_to_string(&path).await?;
+            content_revision(
+                embedding_document::parse_markdown(&existing)
+                    .body
+                    .as_bytes(),
+            )
+        } else {
+            delivery_protocol::MISSING_REVISION.into()
+        };
+        if current != expected_revision {
+            return Err(Error::RevisionConflict {
+                path: relative.into(),
+                expected: expected_revision.into(),
+                current,
+            });
+        }
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        atomic_write(&path, physical.as_bytes()).await?;
+        let revision = content_revision(physical.as_bytes());
+        drop(_write_guard);
+        let _ = schedule_embedding(self, relative.into(), physical.into()).await;
+        let _ = self.notify_document_changed(relative, change_kind).await;
+        Ok(delivery_protocol::DocumentRevision {
+            path: relative.into(),
+            revision,
+        })
+    }
+
+    pub(crate) async fn generated_publication_pending(&self, relative: &str) -> bool {
+        let embedding = self.embedding_status.read().await;
+        let embedding_pending = embedding.path.as_deref() == Some(relative)
+            && matches!(embedding.status.as_str(), "queued" | "processing");
+        drop(embedding);
+        let graph = self.graph_refresh_status().await;
+        embedding_pending
+            || matches!(
+                graph.status,
+                schematic_mcp::GraphRefreshStatus::Queued
+                    | schematic_mcp::GraphRefreshStatus::Processing
+            )
+    }
+
     pub fn project_name(&self) -> Result<String> {
         self.project
             .file_name()
@@ -597,10 +822,19 @@ struct PathQuery {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WriteRequest {
     path: String,
     content: String,
     revision: u64,
+    expected_revision: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteRequest {
+    path: String,
+    expected_revision: String,
 }
 
 #[derive(Serialize)]
@@ -608,8 +842,37 @@ struct WriteRequest {
 struct WriteResponse {
     path: String,
     revision: u64,
+    content_revision: String,
     graph_refresh: schematic_mcp::GraphRefreshOutcome,
     embedding: EmbeddingOutcome,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CoordinatedWrite {
+    path: String,
+    content: String,
+    expected_revision: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CoordinatedWriteRequest {
+    writes: Vec<CoordinatedWrite>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CoordinatedWriteResponse {
+    documents: Vec<delivery_protocol::DocumentRevision>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadResponse {
+    path: String,
+    content: String,
+    content_revision: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -659,10 +922,34 @@ struct CompositionResponse {
     created: bool,
 }
 
+#[derive(Deserialize)]
+struct CompositionRevisionRequest {
+    qualified_name: String,
+}
+
+#[derive(Serialize)]
+struct CompositionRevisionResponse {
+    qualified_name: String,
+    revision: String,
+}
+
+#[derive(Serialize)]
+struct SchematicRevisionResponse {
+    revision: String,
+}
+
+#[derive(Deserialize)]
+struct CompositionRevertRequest {
+    qualified_name: String,
+    expected_revision: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct ProcessRenameRequest {
     old_qualified_name: String,
     new_qualified_name: String,
+    #[serde(default)]
+    expected_revision: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -677,26 +964,312 @@ struct ProjectMetadata {
     assistant_provider: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AssistantProposalSubmission {
+    request: assistant::AssistantRequest,
+    proposal: assistant::AssistantPlan,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AssistantInboxDismissRequest {
+    request_id: String,
+}
+
 pub fn app(state: AppState) -> Router {
     let web = state.project.join(".ss/web");
     Router::new()
         .route("/api/project", get(project_metadata))
         .route("/api/diagrams", get(list_diagrams))
         .route("/api/file", get(read_file).put(write_file))
+        .route("/api/file-deletes", post(delete_file))
+        .route("/api/files", post(write_files))
         .route("/api/graph-refresh", get(graph_refresh_status))
         .route("/api/embedding-status", get(embedding_status))
         .route("/api/rename-documentation", post(rename_documentation))
         .route("/api/compositions", post(resolve_composition))
+        .route("/api/schematic-revision", get(schematic_revision))
+        .route("/api/composition-revisions", post(composition_revision))
+        .route("/api/composition-reverts", post(revert_created_composition))
         .route("/api/process-renames", post(rename_process))
         .route("/api/package-renames", post(rename_package))
         .route(
             "/api/assistant/proposals",
             post(assistant_proposal).layer(DefaultBodyLimit::max(512 * 1024)),
         )
+        .route(
+            "/api/assistant/conversations",
+            post(assistant_conversation).layer(DefaultBodyLimit::max(512 * 1024)),
+        )
+        .route(
+            "/api/assistant/inbox",
+            get(list_assistant_inbox)
+                .post(submit_assistant_inbox)
+                .layer(DefaultBodyLimit::max(512 * 1024)),
+        )
+        .route(
+            "/api/assistant/inbox-dismissals",
+            post(dismiss_assistant_inbox),
+        )
+        .route("/api/assistant/capabilities", get(assistant_capabilities))
         .fallback_service(
             ServeDir::new(&web).not_found_service(ServeFile::new(web.join("index.html"))),
         )
         .with_state(state)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeAuthQuery {
+    token: String,
+    project_id: String,
+    generation: String,
+    #[serde(default)]
+    after: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlayRequestInput {
+    diagram_path: String,
+    source_revision: String,
+    selected_entity_ref: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BuildPlanRequestInput {
+    diagram_path: String,
+    selected_entity_ref: Option<String>,
+    semantic_bump: Option<delivery_protocol::SemanticBump>,
+    expected_prior_version: Option<delivery_protocol::SemanticVersion>,
+}
+
+fn authenticate_runtime(
+    runtime: &project_runtime::ProjectRuntime,
+    query: &RuntimeAuthQuery,
+) -> Result<()> {
+    runtime.authenticate(&query.token, &query.project_id, &query.generation)
+}
+
+fn runtime_routes() -> Router {
+    Router::new()
+        .route("/api/runtime/health", get(runtime_health))
+        .route("/api/runtime/sessions", put(runtime_session))
+        .route("/api/runtime/events", get(runtime_events))
+        .route(
+            "/api/runtime/proposals",
+            get(runtime_proposals).post(runtime_submit_proposal),
+        )
+        .route("/api/runtime/proposals/{id}", get(runtime_proposal))
+        .route(
+            "/api/runtime/proposals/{id}/decisions",
+            post(runtime_decide_proposal),
+        )
+        .route(
+            "/api/runtime/build",
+            get(runtime_build).post(runtime_request_build),
+        )
+        .route(
+            "/api/runtime/build-plans",
+            get(runtime_build_plans).post(runtime_create_build_plan),
+        )
+        .layer(DefaultBodyLimit::max(512 * 1024))
+}
+
+async fn runtime_build_plans(
+    Extension(runtime): Extension<project_runtime::ProjectRuntime>,
+    Query(auth): Query<RuntimeAuthQuery>,
+) -> Result<Json<Vec<delivery_protocol::BuildPlanSummary>>> {
+    authenticate_runtime(&runtime, &auth)?;
+    Ok(Json(runtime.build_plans().await))
+}
+
+async fn runtime_create_build_plan(
+    Extension(runtime): Extension<project_runtime::ProjectRuntime>,
+    Query(auth): Query<RuntimeAuthQuery>,
+    Json(request): Json<BuildPlanRequestInput>,
+) -> Result<(StatusCode, Json<delivery_protocol::BuildPlanRecord>)> {
+    authenticate_runtime(&runtime, &auth)?;
+    let summary = runtime.graph.summary().await;
+    let project_id = runtime.project_id.to_string();
+    let record = runtime
+        .create_build_plan(delivery_protocol::CreateBuildPlanRequest {
+            protocol_version: delivery_protocol::BUILD_PLAN_PROTOCOL_VERSION.into(),
+            project_id,
+            diagram_path: request.diagram_path,
+            selected_entity_ref: request.selected_entity_ref,
+            expected_source_manifest_revision: summary.source_manifest_revision,
+            expected_graph_revision: summary.revision,
+            semantic_bump: request.semantic_bump,
+            expected_prior_version: request.expected_prior_version,
+        })
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(record)))
+}
+
+async fn runtime_build(
+    Extension(runtime): Extension<project_runtime::ProjectRuntime>,
+    Query(auth): Query<RuntimeAuthQuery>,
+) -> Result<Json<Option<delivery_protocol::BuildRequest>>> {
+    authenticate_runtime(&runtime, &auth)?;
+    Ok(Json(runtime.build_request().await?))
+}
+
+async fn runtime_request_build(
+    Extension(runtime): Extension<project_runtime::ProjectRuntime>,
+    Query(auth): Query<RuntimeAuthQuery>,
+    Json(request): Json<PlayRequestInput>,
+) -> Result<(StatusCode, Json<delivery_protocol::BuildRequest>)> {
+    authenticate_runtime(&runtime, &auth)?;
+    let request = runtime
+        .request_build(
+            request.diagram_path,
+            request.source_revision,
+            request.selected_entity_ref,
+        )
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(request)))
+}
+
+async fn runtime_health(
+    Extension(runtime): Extension<project_runtime::ProjectRuntime>,
+    Query(auth): Query<RuntimeAuthQuery>,
+) -> Result<Json<delivery_protocol::DaemonHealth>> {
+    authenticate_runtime(&runtime, &auth)?;
+    Ok(Json(runtime.health(String::new()).await))
+}
+
+async fn runtime_session(
+    Extension(runtime): Extension<project_runtime::ProjectRuntime>,
+    Query(auth): Query<RuntimeAuthQuery>,
+    Json(session): Json<delivery_protocol::BrowserSession>,
+) -> Result<StatusCode> {
+    authenticate_runtime(&runtime, &auth)?;
+    runtime.register_session(session).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn runtime_proposals(
+    Extension(runtime): Extension<project_runtime::ProjectRuntime>,
+    Query(auth): Query<RuntimeAuthQuery>,
+) -> Result<Json<Vec<delivery_protocol::ProposalRecord>>> {
+    authenticate_runtime(&runtime, &auth)?;
+    Ok(Json(runtime.proposals().await))
+}
+
+async fn runtime_proposal(
+    Extension(runtime): Extension<project_runtime::ProjectRuntime>,
+    Query(auth): Query<RuntimeAuthQuery>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<delivery_protocol::ProposalRecord>> {
+    authenticate_runtime(&runtime, &auth)?;
+    runtime
+        .proposal(&id)
+        .await
+        .map(Json)
+        .ok_or_else(|| Error::Message("proposal not found".into()))
+}
+
+async fn runtime_submit_proposal(
+    Extension(runtime): Extension<project_runtime::ProjectRuntime>,
+    Query(auth): Query<RuntimeAuthQuery>,
+    Json(proposal): Json<delivery_protocol::ProposalRecord>,
+) -> Result<(StatusCode, Json<delivery_protocol::ProposalRecord>)> {
+    authenticate_runtime(&runtime, &auth)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(runtime.submit_proposal(proposal).await?),
+    ))
+}
+
+async fn runtime_decide_proposal(
+    Extension(runtime): Extension<project_runtime::ProjectRuntime>,
+    Query(auth): Query<RuntimeAuthQuery>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(decision): Json<delivery_protocol::ProposalDecision>,
+) -> Result<Json<delivery_protocol::ProposalRecord>> {
+    authenticate_runtime(&runtime, &auth)?;
+    if id != decision.proposal_id {
+        return Err(Error::Message("proposal path identity mismatch".into()));
+    }
+    Ok(Json(runtime.decide(decision).await?))
+}
+
+async fn runtime_events(
+    Extension(runtime): Extension<project_runtime::ProjectRuntime>,
+    Query(auth): Query<RuntimeAuthQuery>,
+    headers: HeaderMap,
+) -> Result<Response> {
+    authenticate_runtime(&runtime, &auth)?;
+    let header_cursor = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let events = runtime.events_after(auth.after.max(header_cursor)).await;
+    let mut body = String::new();
+    for event in events {
+        body.push_str(&format!(
+            "id: {}\nevent: {}\ndata: {}\n\n",
+            event.event_id,
+            event.kind,
+            serde_json::to_string(&event).unwrap()
+        ));
+    }
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "text/event-stream"),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+async fn assistant_capabilities() -> Json<serde_json::Value> {
+    Json(assistant::operation_registry())
+}
+
+async fn submit_assistant_inbox(
+    State(state): State<AppState>,
+    Json(submission): Json<AssistantProposalSubmission>,
+) -> Result<StatusCode> {
+    assistant::validate_request(&submission.request)?;
+    assistant::validate_plan(&submission.proposal, &submission.request)?;
+    state
+        .assistant_proposals
+        .write()
+        .await
+        .insert(submission.request.request_id.clone(), submission);
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn list_assistant_inbox(
+    State(state): State<AppState>,
+) -> Json<Vec<AssistantProposalSubmission>> {
+    Json(
+        state
+            .assistant_proposals
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect(),
+    )
+}
+
+async fn dismiss_assistant_inbox(
+    State(state): State<AppState>,
+    Json(request): Json<AssistantInboxDismissRequest>,
+) -> StatusCode {
+    state
+        .assistant_proposals
+        .write()
+        .await
+        .remove(&request.request_id);
+    StatusCode::NO_CONTENT
 }
 
 async fn assistant_proposal(
@@ -725,6 +1298,32 @@ async fn assistant_proposal(
     Ok(Json(result))
 }
 
+async fn assistant_conversation(
+    State(state): State<AppState>,
+    Json(request): Json<assistant::AssistantConversationRequest>,
+) -> Result<Json<assistant::AssistantConversationResult>> {
+    let _permit = state
+        .assistant_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            Error::Message(
+                "assistant request limit reached; wait for an active request to finish".into(),
+            )
+        })?;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        assistant::converse(
+            &request,
+            state.project.as_ref().clone(),
+            resolved_assistant_provider(state.project.as_path()),
+        ),
+    )
+    .await
+    .map_err(|_| Error::Message("assistant provider timed out".into()))??;
+    Ok(Json(result))
+}
+
 async fn project_metadata(State(state): State<AppState>) -> Result<Json<ProjectMetadata>> {
     Ok(Json(ProjectMetadata {
         name: state.project_name()?,
@@ -733,25 +1332,57 @@ async fn project_metadata(State(state): State<AppState>) -> Result<Json<ProjectM
 }
 
 pub async fn serve(project: PathBuf, open_browser: bool) -> Result<()> {
-    let state = AppState::new(project)?;
+    let project = absolute(&project)?.canonicalize()?;
+    let _ = project_runtime::DaemonOwnership::reclaim_stale(&project)?;
+    if let Some(discovery) = project_runtime::DaemonOwnership::healthy_discovery(&project)? {
+        if open_browser {
+            let launch_url = format!(
+                "{}/?daemonToken={}&projectId={}&generation={}",
+                discovery.http_url, discovery.token, discovery.project_id, discovery.generation
+            );
+            open::that(&launch_url)
+                .map_err(|e| Error::Message(format!("could not open browser: {e}")))?;
+        }
+        return Ok(());
+    }
+    let runtime =
+        project_runtime::ProjectRuntime::load(&project, schematic_graph::LoadOptions::default())?;
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+    let rpc_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+    let address = listener.local_addr()?;
+    let rpc_port = rpc_listener.local_addr()?.port();
+    let url = format!("http://{address}");
+    runtime.set_browser_base_url(url.clone())?;
+    runtime
+        .graph
+        .attach_workflow(Arc::new(runtime.clone()))
+        .await;
+    let state = runtime.app.clone();
     let backfill_state = state.clone();
     tokio::spawn(async move {
         let _ = schedule_project_embeddings(&backfill_state).await;
     });
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
-    let address = listener.local_addr()?;
-    let url = format!("http://{address}");
+    let discovery = runtime.discovery(url.clone(), rpc_port);
+    let _ownership = project_runtime::DaemonOwnership::acquire(&project, &discovery)?;
+    let rpc_runtime = runtime.clone();
+    tokio::spawn(async move {
+        let _ = project_runtime::serve_private_mcp(rpc_listener, rpc_runtime).await;
+    });
     println!("Software Schematic is running at {url}");
     if open_browser {
-        open::that(&url).map_err(|e| Error::Message(format!("could not open browser: {e}")))?;
+        runtime.request_browser_open()?;
     }
-    axum::serve(listener, app(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let shutdown_runtime = runtime.clone();
+    axum::serve(
+        listener,
+        app(state).merge(runtime_routes()).layer(Extension(runtime)),
+    )
+    .with_graceful_shutdown(shutdown_signal(shutdown_runtime))
+    .await?;
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(runtime: project_runtime::ProjectRuntime) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -766,7 +1397,29 @@ async fn shutdown_signal() {
     };
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
-    tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
+    let idle = async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            runtime
+                .expire_sessions(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis(),
+                )
+                .await;
+            if runtime.idle_for(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            ) >= std::time::Duration::from_secs(30 * 60)
+            {
+                break;
+            }
+        }
+    };
+    tokio::select! { _ = ctrl_c => {}, _ = terminate => {}, _ = idle => {} }
 }
 
 async fn list_diagrams(State(state): State<AppState>) -> Result<Json<Vec<String>>> {
@@ -795,7 +1448,7 @@ async fn list_diagrams(State(state): State<AppState>) -> Result<Json<Vec<String>
 async fn read_file(
     State(state): State<AppState>,
     Query(query): Query<PathQuery>,
-) -> Result<String> {
+) -> Result<Json<ReadResponse>> {
     let path = state.resolve(&query.path, false)?;
     if !matches!(
         path.extension().and_then(|x| x.to_str()),
@@ -806,17 +1459,23 @@ async fn read_file(
         ));
     }
     let content = tokio::fs::read_to_string(path).await?;
-    if query.path.ends_with(".md") {
-        Ok(embedding_document::parse_markdown(&content).body)
+    let authored = if query.path.ends_with(".md") {
+        embedding_document::parse_markdown(&content).body
     } else {
-        Ok(content)
-    }
+        content
+    };
+    Ok(Json(ReadResponse {
+        path: query.path,
+        content_revision: content_revision(authored.as_bytes()),
+        content: authored,
+    }))
 }
 
 async fn write_file(
     State(state): State<AppState>,
     Json(request): Json<WriteRequest>,
 ) -> Result<Json<WriteResponse>> {
+    let _write_guard = state.document_write_lock.lock().await;
     let path = state.resolve(&request.path, true)?;
     if !matches!(
         path.extension().and_then(|x| x.to_str()),
@@ -831,38 +1490,208 @@ async fn write_file(
     } else {
         schematic_mcp::DocumentChangeKind::Created
     };
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
     let authored_content = if request.path.ends_with(".md") {
         embedding_document::parse_markdown(&request.content).body
     } else {
         request.content
     };
+    let current_revision = if path.exists() {
+        let physical = tokio::fs::read_to_string(&path).await?;
+        let current = if request.path.ends_with(".md") {
+            embedding_document::parse_markdown(&physical).body
+        } else {
+            physical
+        };
+        content_revision(current.as_bytes())
+    } else {
+        delivery_protocol::MISSING_REVISION.into()
+    };
+    if request.expected_revision != current_revision {
+        return Err(Error::RevisionConflict {
+            path: request.path,
+            expected: request.expected_revision,
+            current: current_revision,
+        });
+    }
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
     atomic_write(&path, authored_content.as_bytes()).await?;
+    let new_content_revision = content_revision(authored_content.as_bytes());
+    drop(_write_guard);
     let embedding = if request.path.ends_with(".md") {
         schedule_embedding(&state, request.path.clone(), authored_content).await
     } else {
         state.embedding_status.read().await.clone()
     };
-    let graph_refresh = schematic_mcp::notify_documents_changed(
-        state.project.as_path(),
-        &request.path,
-        change_kind,
-    )
-    .await;
+    let graph_refresh = state
+        .notify_document_changed(&request.path, change_kind)
+        .await;
     Ok(Json(WriteResponse {
         path: request.path,
         revision: request.revision,
+        content_revision: new_content_revision,
         graph_refresh,
         embedding,
     }))
 }
 
+async fn delete_file(
+    State(state): State<AppState>,
+    Json(request): Json<DeleteRequest>,
+) -> Result<StatusCode> {
+    let _write_guard = state.document_write_lock.lock().await;
+    let path = state.resolve(&request.path, false)?;
+    if !matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some("bpmn" | "cmmn" | "md")
+    ) {
+        return Err(Error::Message(
+            "only BPMN, CMMN, and Markdown files are deletable".into(),
+        ));
+    }
+    let physical = tokio::fs::read_to_string(&path).await?;
+    let authored = if request.path.ends_with(".md") {
+        embedding_document::parse_markdown(&physical).body
+    } else {
+        physical
+    };
+    let current = content_revision(authored.as_bytes());
+    if current != request.expected_revision {
+        return Err(Error::RevisionConflict {
+            path: request.path,
+            expected: request.expected_revision,
+            current,
+        });
+    }
+    tokio::fs::remove_file(&path).await?;
+    state.embedding_jobs.lock().await.remove(&request.path);
+    drop(_write_guard);
+    let _ = state
+        .notify_document_changed(&request.path, schematic_mcp::DocumentChangeKind::Deleted)
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn write_files(
+    State(state): State<AppState>,
+    Json(request): Json<CoordinatedWriteRequest>,
+) -> Result<Json<CoordinatedWriteResponse>> {
+    let documents = coordinated_write_documents(&state, request.writes, None).await?;
+    for document in &documents {
+        let _ = state
+            .notify_document_changed(&document.path, schematic_mcp::DocumentChangeKind::Replaced)
+            .await;
+    }
+    Ok(Json(CoordinatedWriteResponse { documents }))
+}
+
+async fn coordinated_write_documents(
+    state: &AppState,
+    writes: Vec<CoordinatedWrite>,
+    fail_after: Option<usize>,
+) -> Result<Vec<delivery_protocol::DocumentRevision>> {
+    if writes.is_empty() {
+        return Err(Error::Message(
+            "coordinated write requires at least one document".into(),
+        ));
+    }
+    let _guard = state.document_write_lock.lock().await;
+    let mut prepared = Vec::with_capacity(writes.len());
+    let mut seen = std::collections::BTreeSet::new();
+    for write in writes {
+        if !seen.insert(write.path.clone()) {
+            return Err(Error::Message(format!(
+                "duplicate coordinated write path: {}",
+                write.path
+            )));
+        }
+        let path = state.resolve(&write.path, true)?;
+        if !matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("bpmn" | "cmmn" | "md")
+        ) {
+            return Err(Error::Message(
+                "only BPMN, CMMN, and Markdown files are writable".into(),
+            ));
+        }
+        let before = if path.exists() {
+            Some(tokio::fs::read(&path).await?)
+        } else {
+            None
+        };
+        let authored_before = before.as_ref().map(|bytes| {
+            if write.path.ends_with(".md") {
+                embedding_document::parse_markdown(&String::from_utf8_lossy(bytes))
+                    .body
+                    .into_bytes()
+            } else {
+                bytes.clone()
+            }
+        });
+        let current_revision = authored_before
+            .as_deref()
+            .map(content_revision)
+            .unwrap_or_else(|| delivery_protocol::MISSING_REVISION.into());
+        if write.expected_revision != current_revision {
+            return Err(Error::RevisionConflict {
+                path: write.path,
+                expected: write.expected_revision,
+                current: current_revision,
+            });
+        }
+        let content = if path.extension().and_then(|value| value.to_str()) == Some("md") {
+            embedding_document::parse_markdown(&write.content)
+                .body
+                .into_bytes()
+        } else {
+            write.content.into_bytes()
+        };
+        prepared.push((write.path, path, before, content));
+    }
+    prepared.sort_by(|left, right| left.0.cmp(&right.0));
+
+    for (committed, (_, path, _, content)) in prepared.iter().enumerate() {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let result = if fail_after == Some(committed) {
+            Err(Error::Message("injected coordinated write failure".into()))
+        } else {
+            atomic_write(path, content).await
+        };
+        if let Err(error) = result {
+            for (_, rollback_path, before, _) in prepared[..committed].iter().rev() {
+                match before {
+                    Some(bytes) => atomic_write(rollback_path, bytes).await?,
+                    None if rollback_path.exists() => tokio::fs::remove_file(rollback_path).await?,
+                    None => {}
+                }
+            }
+            return Err(error);
+        }
+    }
+
+    Ok(prepared
+        .into_iter()
+        .map(
+            |(path, _, _, content)| delivery_protocol::DocumentRevision {
+                path,
+                revision: content_revision(&content),
+            },
+        )
+        .collect())
+}
+
+pub fn content_revision(content: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("sha256:{:x}", Sha256::digest(content))
+}
+
 async fn graph_refresh_status(
     State(state): State<AppState>,
 ) -> Json<schematic_mcp::GraphRefreshOutcome> {
-    Json(schematic_mcp::graph_refresh_status(state.project.as_path()).await)
+    Json(state.graph_refresh_status().await)
 }
 
 async fn embedding_status(State(state): State<AppState>) -> Json<EmbeddingOutcome> {
@@ -1039,12 +1868,9 @@ async fn publish_embedding_header(
         atomic_write(&path, physical.as_bytes()).await?;
     }
     state.embedding_jobs.lock().await.remove(relative);
-    let _ = schematic_mcp::notify_documents_changed(
-        state.project.as_path(),
-        relative,
-        schematic_mcp::DocumentChangeKind::Replaced,
-    )
-    .await;
+    let _ = state
+        .notify_document_changed(relative, schematic_mcp::DocumentChangeKind::Replaced)
+        .await;
     Ok(true)
 }
 
@@ -1136,12 +1962,9 @@ async fn rename_documentation(
         let body = embedding_document::parse_markdown(&physical).body;
         atomic_write(&new, body.as_bytes()).await?;
         schedule_embedding(&state, relative.clone(), body).await;
-        let _ = schematic_mcp::notify_documents_changed(
-            state.project.as_path(),
-            &relative,
-            schematic_mcp::DocumentChangeKind::Renamed,
-        )
-        .await;
+        let _ = state
+            .notify_document_changed(&relative, schematic_mcp::DocumentChangeKind::Renamed)
+            .await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1163,6 +1986,7 @@ async fn resolve_composition(
     State(state): State<AppState>,
     Json(request): Json<CompositionRequest>,
 ) -> Result<Json<CompositionResponse>> {
+    let _write_guard = state.document_write_lock.lock().await;
     let (name, relative_folder, extension, starter) =
         match request.kind.as_str() {
             "bpmn" => {
@@ -1217,12 +2041,12 @@ async fn resolve_composition(
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        let _ = schematic_mcp::notify_documents_changed(
-            state.project.as_path(),
-            &relative_diagram,
-            schematic_mcp::DocumentChangeKind::Created,
-        )
-        .await;
+        let _ = state
+            .notify_document_changed(
+                &relative_diagram,
+                schematic_mcp::DocumentChangeKind::Created,
+            )
+            .await;
     }
     let relative = |path: &Path| {
         path.strip_prefix(state.schematics.as_path())
@@ -1238,10 +2062,130 @@ async fn resolve_composition(
     }))
 }
 
+fn composition_tree_revision(folder: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    if !folder.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{} not found", folder.display()),
+        )
+        .into());
+    }
+    let mut files = Vec::new();
+    for entry in WalkDir::new(folder).follow_links(false) {
+        let entry = entry?;
+        if entry.file_type().is_symlink() {
+            return Err(Error::Message(
+                "composition revisions do not follow symbolic links".into(),
+            ));
+        }
+        if entry.file_type().is_file() {
+            files.push(entry.path().to_path_buf());
+        }
+    }
+    files.sort_by(|left, right| {
+        left.strip_prefix(folder)
+            .unwrap()
+            .cmp(right.strip_prefix(folder).unwrap())
+    });
+    let mut digest = Sha256::new();
+    for path in files {
+        let relative = path.strip_prefix(folder).unwrap().to_string_lossy();
+        digest.update(relative.as_bytes());
+        digest.update([0]);
+        let bytes = fs::read(&path)?;
+        if path.extension().and_then(|value| value.to_str()) == Some("md") {
+            let physical = String::from_utf8(bytes)
+                .map_err(|_| Error::Message("composition Markdown must be UTF-8".into()))?;
+            digest.update(embedding_document::parse_markdown(&physical).body);
+        } else {
+            digest.update(bytes);
+        }
+        digest.update([0]);
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+async fn composition_revision(
+    State(state): State<AppState>,
+    Json(request): Json<CompositionRevisionRequest>,
+) -> Result<Json<CompositionRevisionResponse>> {
+    let relative = composition_folder_for_name(&request.qualified_name)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let folder = state.resolve(&relative, false)?;
+    Ok(Json(CompositionRevisionResponse {
+        qualified_name: request.qualified_name,
+        revision: composition_tree_revision(&folder)?,
+    }))
+}
+
+async fn schematic_revision(
+    State(state): State<AppState>,
+) -> Result<Json<SchematicRevisionResponse>> {
+    Ok(Json(SchematicRevisionResponse {
+        revision: composition_tree_revision(state.schematics.as_path())?,
+    }))
+}
+
+async fn revert_created_composition(
+    State(state): State<AppState>,
+    Json(request): Json<CompositionRevertRequest>,
+) -> Result<StatusCode> {
+    let relative = composition_folder_for_name(&request.qualified_name)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let _write_guard = state.document_write_lock.lock().await;
+    let folder = state.resolve(&relative, false)?;
+    let current = composition_tree_revision(&folder)?;
+    if current != request.expected_revision {
+        return Err(Error::RevisionConflict {
+            path: relative,
+            expected: request.expected_revision,
+            current,
+        });
+    }
+
+    let file_name = folder
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| Error::Message("composition folder has no valid name".into()))?;
+    let tombstone = folder.with_file_name(format!(
+        ".{file_name}.assistant-revert-{}",
+        std::process::id()
+    ));
+    if tombstone.exists() {
+        return Err(Error::Message(
+            "a previous composition revert requires recovery".into(),
+        ));
+    }
+    tokio::fs::rename(&folder, &tombstone).await?;
+    let staged_revision = composition_tree_revision(&tombstone)?;
+    if staged_revision != request.expected_revision {
+        tokio::fs::rename(&tombstone, &folder).await?;
+        return Err(Error::RevisionConflict {
+            path: relative,
+            expected: request.expected_revision,
+            current: staged_revision,
+        });
+    }
+    if let Err(error) = tokio::fs::remove_dir_all(&tombstone).await {
+        let _ = tokio::fs::rename(&tombstone, &folder).await;
+        return Err(error.into());
+    }
+    let deleted = format!("{relative}/main.bpmn");
+    let _ = state
+        .notify_document_changed(&deleted, schematic_mcp::DocumentChangeKind::Deleted)
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn rename_package(
     State(state): State<AppState>,
     Json(request): Json<PackageRenameRequest>,
 ) -> Result<StatusCode> {
+    let _write_guard = state.document_write_lock.lock().await;
     validate_package_name(&request.old_package_name)?;
     validate_package_name(&request.new_package_name)?;
     let old_folder = request.old_package_name.replace('.', "/");
@@ -1266,12 +2210,9 @@ async fn rename_package(
         &request.new_package_name,
     )?;
     let renamed = format!("{new_folder}/main.cmmn");
-    let _ = schematic_mcp::notify_documents_changed(
-        state.project.as_path(),
-        &renamed,
-        schematic_mcp::DocumentChangeKind::Renamed,
-    )
-    .await;
+    let _ = state
+        .notify_document_changed(&renamed, schematic_mcp::DocumentChangeKind::Renamed)
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1298,8 +2239,19 @@ async fn rename_process(
     State(state): State<AppState>,
     Json(request): Json<ProcessRenameRequest>,
 ) -> Result<StatusCode> {
+    let _write_guard = state.document_write_lock.lock().await;
     validate_qualified_process_name(&request.old_qualified_name)?;
     validate_qualified_process_name(&request.new_qualified_name)?;
+    if let Some(expected) = request.expected_revision.as_deref() {
+        let current = composition_tree_revision(state.schematics.as_path())?;
+        if current != expected {
+            return Err(Error::RevisionConflict {
+                path: ".".into(),
+                expected: expected.into(),
+                current,
+            });
+        }
+    }
     let old_folder = composition_folder_for_name(&request.old_qualified_name)?
         .to_string_lossy()
         .replace('\\', "/");
@@ -1321,12 +2273,9 @@ async fn rename_process(
         &request.new_qualified_name,
     )?;
     let renamed = format!("{new_folder}/main.bpmn");
-    let _ = schematic_mcp::notify_documents_changed(
-        state.project.as_path(),
-        &renamed,
-        schematic_mcp::DocumentChangeKind::Renamed,
-    )
-    .await;
+    let _ = state
+        .notify_document_changed(&renamed, schematic_mcp::DocumentChangeKind::Renamed)
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1468,8 +2417,24 @@ mod tests {
         assert!(
             fs::read_to_string(directory.path().join("AGENTS.md"))
                 .unwrap()
-                .contains("resolve the request's natural language")
+                .contains("deep interview with frequent small visual proposals")
         );
+        for skill in ["design", "plan", "build"] {
+            let codex_skill = directory
+                .path()
+                .join(".codex/skills")
+                .join(skill)
+                .join("SKILL.md");
+            let claude_skill = directory
+                .path()
+                .join(".claude/commands")
+                .join(format!("{skill}.md"));
+            assert!(codex_skill.is_file());
+            assert!(claude_skill.is_file());
+            let contents = fs::read_to_string(codex_skill).unwrap();
+            assert!(!contents.contains(directory.path().to_string_lossy().as_ref()));
+            assert!(!contents.to_ascii_lowercase().contains("api_key"));
+        }
         let codex = fs::read_to_string(directory.path().join(".codex/config.toml")).unwrap();
         assert!(codex.contains("software_schematic"));
         assert!(codex.contains("command = \"./ssw\""));
@@ -1502,10 +2467,26 @@ mod tests {
     fn update_preserves_authored_files_and_is_idempotent_with_crlf() {
         let (directory, layout) = initialized();
         let diagram_before = fs::read(layout.schematics.join("main.cmmn")).unwrap();
+        let workflow_path = layout.tool.join("workflows/interviews/authored.json");
+        fs::write(&workflow_path, "{\"authored\":true}\n").unwrap();
+        #[cfg(unix)]
+        let runtime_inode_before = {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(layout.tool.join("bin/ss")).unwrap().ino()
+        };
         fs::write(layout.tool.join("NOTICE"), "stale managed notice").unwrap();
         fs::write(directory.path().join("AGENTS.md"), "authored\r\n\r\n<!-- software-schematic:begin -->\r\nstale\r\n<!-- software-schematic:end -->\r\ntail\r\n").unwrap();
         fs::write(directory.path().join(".codex/config.toml"), "theme = \"dark\"\n\n[mcp_servers.other]\ncommand = \"other\"\n\n[mcp_servers.software_schematic]\ncommand = \"stale\"\n").unwrap();
         update_project(directory.path()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_ne!(
+                runtime_inode_before,
+                fs::metadata(layout.tool.join("bin/ss")).unwrap().ino(),
+                "update must atomically replace rather than overwrite the executable inode"
+            );
+        }
         let once_agents = fs::read(directory.path().join("AGENTS.md")).unwrap();
         let once_codex = fs::read(directory.path().join(".codex/config.toml")).unwrap();
         update_project(directory.path()).unwrap();
@@ -1535,6 +2516,45 @@ mod tests {
             fs::read_to_string(layout.tool.join("NOTICE")).unwrap(),
             PROJECT_NOTICE
         );
+        assert_eq!(
+            fs::read_to_string(workflow_path).unwrap(),
+            "{\"authored\":true}\n"
+        );
+        assert!(
+            fs::read_to_string(directory.path().join(".codex/skills/design/SKILL.md"))
+                .unwrap()
+                .contains("open_design_workspace")
+        );
+    }
+
+    #[test]
+    fn doctor_repair_restores_guided_skill_without_touching_authored_state() {
+        let (directory, layout) = initialized();
+        let markdown = layout.schematics.join("main.md");
+        fs::write(&markdown, "# Authored model\nKeep this.\n").unwrap();
+        let workflow = layout.tool.join("workflows/interviews/authored.json");
+        fs::write(&workflow, "{\"authored\":true}\n").unwrap();
+        let unrelated = directory.path().join(".codex/unrelated.txt");
+        fs::write(&unrelated, "keep\n").unwrap();
+        fs::remove_file(directory.path().join(".codex/skills/design/SKILL.md")).unwrap();
+
+        let report = doctor_project(directory.path(), true).unwrap();
+        assert_eq!(report.status, "ready");
+        assert!(report.repaired);
+        assert!(
+            fs::read_to_string(directory.path().join(".codex/skills/design/SKILL.md"))
+                .unwrap()
+                .contains("open_design_workspace")
+        );
+        assert_eq!(
+            fs::read_to_string(markdown).unwrap(),
+            "# Authored model\nKeep this.\n"
+        );
+        assert_eq!(
+            fs::read_to_string(workflow).unwrap(),
+            "{\"authored\":true}\n"
+        );
+        assert_eq!(fs::read_to_string(unrelated).unwrap(), "keep\n");
     }
 
     #[test]
@@ -1660,7 +2680,8 @@ mod tests {
             "PUT",
             "/api/file",
             Some(serde_json::json!({
-                "path": "docs/Task_1.md", "content": "complete documentation", "revision": 7
+                "path": "docs/Task_1.md", "content": "complete documentation", "revision": 7,
+                "expectedRevision": "missing"
             })),
         )
         .await;
@@ -1668,6 +2689,10 @@ mod tests {
         let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(response["path"], "docs/Task_1.md");
         assert_eq!(response["revision"], 7);
+        assert_eq!(
+            response["contentRevision"],
+            content_revision(b"complete documentation")
+        );
         assert_eq!(response["graphRefresh"]["status"], "notRunning");
         let (status, bytes) = send(
             router.clone(),
@@ -1677,7 +2702,12 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(bytes, b"complete documentation");
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["content"], "complete documentation");
+        assert_eq!(
+            response["contentRevision"],
+            content_revision(b"complete documentation")
+        );
         let (status, bytes) = send(router.clone(), "GET", "/api/diagrams", None).await;
         assert_eq!(status, StatusCode::OK);
         assert!(String::from_utf8(bytes).unwrap().contains("main.cmmn"));
@@ -1685,6 +2715,127 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(response["status"], "notRunning");
+    }
+
+    #[test]
+    fn content_revisions_are_strong_and_content_addressed() {
+        assert_eq!(
+            content_revision(b"same bytes"),
+            content_revision(b"same bytes")
+        );
+        assert_ne!(
+            content_revision(b"same bytes"),
+            content_revision(b"different bytes")
+        );
+        assert!(content_revision(b"same bytes").starts_with("sha256:"));
+    }
+
+    #[tokio::test]
+    async fn conditional_writes_reject_stale_revisions_without_losing_newer_content() {
+        let (directory, layout) = initialized();
+        let path = layout.schematics.join("main.md");
+        let base = embedding_document::parse_markdown(&fs::read_to_string(&path).unwrap()).body;
+        let base_revision = content_revision(base.as_bytes());
+        let router = app(AppState::new(directory.path()).unwrap());
+
+        let (status, bytes) = send(
+            router.clone(),
+            "PUT",
+            "/api/file",
+            Some(serde_json::json!({
+                "path": "main.md", "content": "newer", "revision": 1,
+                "expectedRevision": base_revision
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let accepted: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let (status, bytes) = send(
+            router,
+            "PUT",
+            "/api/file",
+            Some(serde_json::json!({
+                "path": "main.md", "content": "stale overwrite", "revision": 2,
+                "expectedRevision": base_revision
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let conflict: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(conflict["code"], "revisionConflict");
+        assert_eq!(conflict["currentRevision"], accepted["contentRevision"]);
+        assert_eq!(fs::read_to_string(path).unwrap(), "newer");
+    }
+
+    #[tokio::test]
+    async fn conditional_delete_restores_missing_without_removing_newer_content() {
+        let (directory, layout) = initialized();
+        let path = layout.schematics.join("docs/Temporary.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "assistant annotation").unwrap();
+        let original_revision = content_revision(b"assistant annotation");
+        let router = app(AppState::new(directory.path()).unwrap());
+
+        fs::write(&path, "newer user annotation").unwrap();
+        let (status, _) = send(
+            router.clone(),
+            "POST",
+            "/api/file-deletes",
+            Some(serde_json::json!({
+                "path": "docs/Temporary.md",
+                "expectedRevision": original_revision
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "newer user annotation");
+
+        let (status, _) = send(
+            router,
+            "POST",
+            "/api/file-deletes",
+            Some(serde_json::json!({
+                "path": "docs/Temporary.md",
+                "expectedRevision": content_revision(b"newer user annotation")
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn coordinated_writes_roll_back_every_document_after_mid_commit_failure() {
+        let (directory, layout) = initialized();
+        let state = AppState::new(directory.path()).unwrap();
+        let diagram_path = layout.schematics.join("main.cmmn");
+        let markdown_path = layout.schematics.join("main.md");
+        let diagram_before = fs::read(&diagram_path).unwrap();
+        let markdown_physical_before = fs::read(&markdown_path).unwrap();
+        let markdown_before =
+            embedding_document::parse_markdown(&String::from_utf8_lossy(&markdown_physical_before))
+                .body;
+        let result = coordinated_write_documents(
+            &state,
+            vec![
+                CoordinatedWrite {
+                    path: "main.md".into(),
+                    content: "changed markdown".into(),
+                    expected_revision: content_revision(markdown_before.as_bytes()),
+                },
+                CoordinatedWrite {
+                    path: "main.cmmn".into(),
+                    content: "changed diagram".into(),
+                    expected_revision: content_revision(&diagram_before),
+                },
+            ],
+            Some(1),
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("injected"));
+        assert_eq!(fs::read(diagram_path).unwrap(), diagram_before);
+        assert_eq!(fs::read(markdown_path).unwrap(), markdown_physical_before);
     }
 
     #[tokio::test]
@@ -1738,7 +2889,93 @@ mod tests {
         );
         let (status, bytes) = send(app(state), "GET", "/api/file?path=main.md", None).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(bytes, newer_body.as_bytes());
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["content"], newer_body);
+    }
+
+    #[tokio::test]
+    async fn markdown_save_publishes_text_then_hybrid_without_false_graph_warning() {
+        let (directory, layout) = initialized();
+        let server = schematic_mcp::SchematicMcp::load(
+            directory.path(),
+            schematic_graph::LoadOptions::deterministic_test(),
+        )
+        .unwrap();
+        let state = AppState::new(directory.path())
+            .unwrap()
+            .with_graph(server.clone());
+        let path = layout.schematics.join("main.md");
+        let body = "# Two-stage publication\nThe authored body remains stable.\n";
+        atomic_write(&path, body.as_bytes()).await.unwrap();
+
+        state
+            .notify_document_changed("main.md", schematic_mcp::DocumentChangeKind::Replaced)
+            .await;
+        let text_ready = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let status = server.refresh_status_public().await;
+                if !matches!(
+                    status.status,
+                    schematic_mcp::GraphRefreshStatus::Queued
+                        | schematic_mcp::GraphRefreshStatus::Processing
+                ) {
+                    break status;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(text_ready.retrieval_mode.as_deref(), Some("text"));
+        assert_eq!(
+            text_ready.vector_readiness,
+            Some(schematic_graph::VectorReadiness::Pending)
+        );
+        assert!(!text_ready.diagnostic.as_deref().is_some_and(|diagnostic| {
+            diagnostic.contains("embedding header")
+                || diagnostic.contains("vector retrieval is pending")
+        }));
+
+        let generation = 42;
+        let envelope = schematic_graph::derive_embedding_envelope(
+            directory.path(),
+            "main.cmmn#diagram",
+            body,
+            &schematic_graph::LoadOptions::deterministic_test(),
+        )
+        .unwrap();
+        state
+            .embedding_jobs
+            .lock()
+            .await
+            .insert("main.md".into(), generation);
+        assert!(
+            publish_embedding_header(&state, "main.md", generation, body, &envelope)
+                .await
+                .unwrap()
+        );
+        let hybrid_ready = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let status = server.refresh_status_public().await;
+                if !matches!(
+                    status.status,
+                    schematic_mcp::GraphRefreshStatus::Queued
+                        | schematic_mcp::GraphRefreshStatus::Processing
+                ) {
+                    break status;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(hybrid_ready.retrieval_mode.as_deref(), Some("hybrid"));
+        assert_eq!(
+            hybrid_ready.vector_readiness,
+            Some(schematic_graph::VectorReadiness::Current)
+        );
+        let physical = fs::read_to_string(path).unwrap();
+        assert_eq!(embedding_document::parse_markdown(&physical).body, body);
     }
 
     #[tokio::test]
@@ -1750,10 +2987,9 @@ mod tests {
         )
         .unwrap();
         let initial = server.summary().await.revision;
-        let _listener = schematic_mcp::start_refresh_listener(server.clone())
-            .await
-            .unwrap();
-        let router = app(AppState::new(directory.path()).unwrap());
+        let router = app(AppState::new(directory.path())
+            .unwrap()
+            .with_graph(server.clone()));
         let (status, bytes) = send(
             router,
             "PUT",
@@ -1761,7 +2997,8 @@ mod tests {
             Some(serde_json::json!({
                 "path": "main.md",
                 "content": "# Evaluated contract\nA required parameter was added by the user.",
-                "revision": 1
+                "revision": 1,
+                "expectedRevision": content_revision(fs::read_to_string(directory.path().join("schematics/main.md")).unwrap().as_bytes())
             })),
         )
         .await;
@@ -1770,7 +3007,7 @@ mod tests {
         assert_eq!(response["graphRefresh"]["status"], "queued");
         let active = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let status = schematic_mcp::graph_refresh_status(directory.path()).await;
+                let status = server.refresh_status_public().await;
                 if !matches!(
                     status.status,
                     schematic_mcp::GraphRefreshStatus::Queued
@@ -1910,6 +3147,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn created_composition_revert_requires_its_current_tree_revision() {
+        let (directory, _) = initialized();
+        let router = app(AppState::new(directory.path()).unwrap());
+        let qualified_name = "sales.Rollback";
+        let (status, _) = send(
+            router.clone(),
+            "POST",
+            "/api/compositions",
+            Some(serde_json::json!({ "qualified_name": qualified_name })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let revision_request = serde_json::json!({ "qualified_name": qualified_name });
+        let (status, bytes) = send(
+            router.clone(),
+            "POST",
+            "/api/composition-revisions",
+            Some(revision_request.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let initial: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let folder = directory.path().join("schematics/sales/Rollback");
+        fs::write(folder.join("main.md"), "newer user documentation").unwrap();
+
+        let (status, bytes) = send(
+            router.clone(),
+            "POST",
+            "/api/composition-reverts",
+            Some(serde_json::json!({
+                "qualified_name": qualified_name,
+                "expected_revision": initial["revision"]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let conflict: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(conflict["code"], "revisionConflict");
+        assert!(folder.is_dir());
+        assert_eq!(
+            fs::read_to_string(folder.join("main.md")).unwrap(),
+            "newer user documentation"
+        );
+
+        let (status, bytes) = send(
+            router.clone(),
+            "POST",
+            "/api/composition-revisions",
+            Some(revision_request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let current: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let (status, _) = send(
+            router,
+            "POST",
+            "/api/composition-reverts",
+            Some(serde_json::json!({
+                "qualified_name": qualified_name,
+                "expected_revision": current["revision"]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(!folder.exists());
+    }
+
+    #[tokio::test]
     async fn cmmn_business_anchor_coexists_with_descendant_bpmn_and_renames_confined_package() {
         let (directory, _) = initialized();
         let router = app(AppState::new(directory.path()).unwrap());
@@ -2029,6 +3335,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_rename_rollback_rejects_a_stale_schematic_revision() {
+        let (directory, _) = initialized();
+        let router = app(AppState::new(directory.path()).unwrap());
+        let (status, _) = send(
+            router.clone(),
+            "POST",
+            "/api/compositions",
+            Some(serde_json::json!({ "qualified_name": "sales.Order" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, bytes) = send(router.clone(), "GET", "/api/schematic-revision", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let revision: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        fs::write(
+            directory.path().join("schematics/main.md"),
+            "newer user documentation",
+        )
+        .unwrap();
+
+        let (status, bytes) = send(
+            router,
+            "POST",
+            "/api/process-renames",
+            Some(serde_json::json!({
+                "old_qualified_name": "sales.Order",
+                "new_qualified_name": "sales.RenamedOrder",
+                "expected_revision": revision["revision"]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let conflict: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(conflict["code"], "revisionConflict");
+        assert!(
+            directory
+                .path()
+                .join("schematics/sales/Order/main.bpmn")
+                .is_file()
+        );
+        assert!(
+            !directory
+                .path()
+                .join("schematics/sales/RenamedOrder")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
     async fn assistant_endpoint_returns_a_correlated_non_mutating_fake_proposal() {
         let (directory, _) = initialized();
         fs::create_dir_all(directory.path().join(".ss")).unwrap();
@@ -2043,7 +3398,12 @@ mod tests {
             "requestId": "request-1", "prompt": "Improve this task", "snapshot": {
                 "version": "2.0", "diagramPath": "main.cmmn", "sourceRevision": "revision-1", "primaryNodeId": "Task_1",
                 "graph": {"nodes": [{"id": "Task_1", "name": "work", "label": "Work", "status": "open"}], "flows": []}
-            }
+            },
+            "turns": [
+                {"role":"user", "text":"Explain the current task."},
+                {"role":"assistant", "text":"It represents the persisted work step."},
+                {"role":"user", "text":"Suggest a clearer label."}
+            ]
         }))).await;
         assert_eq!(status, StatusCode::OK);
         let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -2053,5 +3413,117 @@ mod tests {
             fs::read_to_string(directory.path().join("schematics/main.cmmn")).unwrap(),
             before
         );
+    }
+
+    #[tokio::test]
+    async fn assistant_conversation_endpoint_returns_prose_without_a_proposal() {
+        let (directory, _) = initialized();
+        fs::create_dir_all(directory.path().join(".ss")).unwrap();
+        fs::write(
+            directory.path().join(".ss/assistant.json"),
+            br#"{"provider":"fake"}"#,
+        )
+        .unwrap();
+        let before = fs::read_to_string(directory.path().join("schematics/main.cmmn")).unwrap();
+        let router = app(AppState::new(directory.path()).unwrap());
+        let (status, bytes) = send(router.clone(), "POST", "/api/assistant/conversations", Some(serde_json::json!({
+            "requestId": "conversation-1", "snapshot": {
+                "version": "2.0", "scope": "node", "diagramPath": "main.cmmn", "sourceRevision": "revision-1", "primaryElementId": "Task_1", "primaryNodeId": "Task_1",
+                "graph": {"nodes": [{"id": "Task_1", "type": "cmmn:HumanTask", "name": "work", "label": "Work", "status": "open"}], "flows": []}
+            },
+            "turns": [{"role":"user", "text":"What should this task do?"}]
+        }))).await;
+        assert_eq!(status, StatusCode::OK);
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["provider"], "fake");
+        assert!(result["reply"].as_str().unwrap().contains("Task_1"));
+        assert!(result.get("proposal").is_none());
+        assert_eq!(
+            fs::read_to_string(directory.path().join("schematics/main.cmmn")).unwrap(),
+            before
+        );
+
+        let (status, _) = send(router, "POST", "/api/assistant/conversations", Some(serde_json::json!({
+            "requestId": "conversation-2", "snapshot": {"version":"2.0","diagramPath":"main.cmmn"},
+            "turns": [{"role":"assistant", "text":"Not a user turn"}]
+        }))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn assistant_conversation_endpoint_rejects_requests_when_slots_are_full() {
+        let (directory, _) = initialized();
+        fs::create_dir_all(directory.path().join(".ss")).unwrap();
+        fs::write(
+            directory.path().join(".ss/assistant.json"),
+            br#"{"provider":"fake"}"#,
+        )
+        .unwrap();
+        let state = AppState::new(directory.path()).unwrap();
+        let _first = state.assistant_slots.clone().try_acquire_owned().unwrap();
+        let _second = state.assistant_slots.clone().try_acquire_owned().unwrap();
+        let router = app(state);
+        let (status, bytes) = send(router, "POST", "/api/assistant/conversations", Some(serde_json::json!({
+            "requestId": "conversation-full", "snapshot": {"version":"2.0","diagramPath":"main.cmmn"},
+            "turns": [{"role":"user", "text":"Continue"}]
+        }))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("request limit reached")
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_proposals_enter_the_same_validated_browser_inbox() {
+        let (directory, _) = initialized();
+        let router = app(AppState::new(directory.path()).unwrap());
+        let submission = serde_json::json!({
+            "request": {
+                "requestId": "chat-request-1",
+                "prompt": "Rename the task",
+                "snapshot": {
+                    "version": "2.0",
+                    "diagramKind": "cmmn",
+                    "diagramPath": "main.cmmn",
+                    "sourceRevision": "snapshot-revision",
+                    "graph": {
+                        "nodes": [{
+                            "id": "Task_1", "type": "cmmn:HumanTask",
+                            "name": "sales#work", "label": "Work", "status": "open"
+                        }],
+                        "flows": []
+                    }
+                }
+            },
+            "proposal": {
+                "version": "2.0",
+                "requestId": "chat-request-1",
+                "sourceRevision": "snapshot-revision",
+                "summary": "Use a concise task label",
+                "assumptions": [],
+                "warnings": [],
+                "operations": [{
+                    "type": "update_node_label", "diagramPath": "main.cmmn",
+                    "nodeId": "Task_1", "label": "Save data"
+                }]
+            }
+        });
+        let (status, _) = send(
+            router.clone(),
+            "POST",
+            "/api/assistant/inbox",
+            Some(submission),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let (status, bytes) = send(router, "GET", "/api/assistant/inbox", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let inbox: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(inbox[0]["request"]["requestId"], "chat-request-1");
+        assert_eq!(inbox[0]["proposal"]["operations"][0]["label"], "Save data");
     }
 }

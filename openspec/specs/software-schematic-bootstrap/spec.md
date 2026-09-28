@@ -20,27 +20,31 @@ The maintained source distribution SHALL build `ss` as one self-contained native
 - **THEN** the installed runtime contains the applicable Software Schematic license, Cybling Labs notice, required third-party notices, browser assets, templates, and model assets
 
 ### Requirement: Project initialization
-The `ss init` command SHALL initialize the current directory with `.ss/`, `schematics/`, platform wrapper launchers, a managed project `.codex/config.toml` MCP entry, and a managed Software Schematic block in root `AGENTS.md`, including a versioned runtime, bundled web and embedding assets, `schematics/main.cmmn`, and `schematics/main.md`. The MCP entry SHALL launch the pinned project wrapper and derive the project root from that wrapper. The managed instructions SHALL require project-identity verification, treat diagrams and Markdown as the detailed contract, send natural proposal language to MCP, record the resolved root identity, link every task to authorized nodes, and implement only returned `new` or `modify` scope.
+`ss init` SHALL install the project wrapper, bundled UI/runtime, project MCP entry, managed guidance, and `design`, `graph`, and `build` skills. Generated configuration SHALL use project-relative commands and preserve unrelated settings.
+
+#### Scenario: Developer initializes a project
+- **WHEN** `ss init` succeeds
+- **THEN** running `./ssw` opens the diagram tool and the configured AI client can discover the model-driven workflow tools
 
 #### Scenario: Initialize an empty project
-- **WHEN** a user runs `ss init` at the root of a project where none of the required Software Schematic paths exist
-- **THEN** the command creates the complete runnable workspace, records the installed tool version, registers its project MCP in `.codex/config.toml`, and installs managed guidance in `AGENTS.md`
+- **WHEN** a developer runs `ss init` in a project without Software Schematic paths
+- **THEN** it creates the runnable local workspace, project MCP entry, managed guidance, and the three workflow skills
 
 #### Scenario: Existing agent instructions are present
-- **WHEN** initialization or an explicit Software Schematic project update encounters an `AGENTS.md` with user-authored content outside the managed sentinels
-- **THEN** it creates or replaces only the sentinel-delimited Software Schematic block and preserves the unrelated content
+- **WHEN** initialization finds user-authored `AGENTS.md` content outside the managed sentinels
+- **THEN** it changes only the Software Schematic block and preserves the user content
 
 #### Scenario: Managed guidance is applied twice
-- **WHEN** the same guidance version is installed more than once
-- **THEN** `AGENTS.md` contains exactly one current managed block and otherwise remains unchanged
+- **WHEN** the same managed guidance is installed again
+- **THEN** `AGENTS.md` contains one current managed block and is otherwise unchanged
 
 #### Scenario: Existing Codex project configuration is present
-- **WHEN** initialization or update encounters `.codex/config.toml` with unrelated project settings or MCP servers
-- **THEN** it creates or replaces only the managed Software Schematic MCP entry and preserves all unrelated valid configuration
+- **WHEN** initialization finds unrelated valid entries in `.codex/config.toml`
+- **THEN** it changes only the project-local Software Schematic MCP entry
 
 #### Scenario: Initialization target collides
-- **WHEN** `.ss/`, `schematics/`, or a generated wrapper path already exists during first-time initialization
-- **THEN** initialization stops without overwriting the existing runtime or schematic path and reports the collision
+- **WHEN** a required Software Schematic path already exists during first-time initialization
+- **THEN** initialization stops without overwriting it and reports the collision
 
 ### Requirement: Project-local wrapper launch
 The generated `ssw` launcher on macOS and `ssw.cmd` launcher on Windows SHALL invoke the runtime pinned in `.ss/bin/` for the containing project and SHALL route an `mcp` invocation to the pinned runtime's project-local stdio MCP command.
@@ -90,11 +94,22 @@ Adding CMMN support SHALL initialize `schematics/main.cmmn` as the sole project 
 - **THEN** startup reports competing anchors instead of choosing one silently
 
 ### Requirement: Existing-project agent guidance update
-The system SHALL provide an explicit, idempotent project update path that installs the current project-local Codex MCP entry, managed Software Schematic `AGENTS.md` block, and required MCP runtime assets in an already initialized compatible project without rewriting schematic content or unrelated Codex configuration or agent instructions.
+Update and doctor repair SHALL replace only managed wrapper, runtime, MCP, guidance, and skill assets while preserving authored diagrams, Markdown, code, and unrelated host configuration.
+
+#### Scenario: Managed skill is missing
+- **WHEN** `./ssw doctor --repair` runs
+- **THEN** the missing skill is restored and no enterprise health or migration workflow is required
 
 #### Scenario: Existing project is updated
-- **WHEN** a user invokes the documented update path in a compatible initialized project
-- **THEN** the pinned runtime, MCP assets, project Codex registration, wrapper routing, and managed guidance are current while authored diagrams, Markdown, unrelated Codex configuration, and unrelated `AGENTS.md` content are preserved
+- **WHEN** a developer runs the project update or repair path
+- **THEN** managed runtime and AI integration files become current while diagrams, Markdown, code, and unrelated configuration remain unchanged
+
+### Requirement: Workflow-focused generated skills
+The generated design skill SHALL conduct the deep iterative interview, the graph skill SHALL publish current durable diagram changes, and the build skill SHALL respond to Play with revision-bound implementation and evidence.
+
+#### Scenario: Developer clicks Play after interviewing
+- **WHEN** the AI client is waiting on the project workflow
+- **THEN** the generated skills carry current diagram scope into implementation without copied prompts or identifiers
 
 ### Requirement: Codex project activation guidance
 Initialized project documentation SHALL explain that project `.codex/config.toml` is scoped to the repository, that Codex must trust or activate the repository configuration, and that a fresh Codex task may be required after registration changes. It SHALL instruct users to verify the Software Schematic MCP project overview before development.

@@ -276,19 +276,48 @@ export class RevisionQueue {
     this.onState = onState;
     this.revisions = new Map();
     this.chains = new Map();
+    this.baseRevisions = new Map();
+    this.baseContents = new Map();
+    this.pending = new Set();
+  }
+
+  setBaseRevision(path, revision) {
+    this.baseRevisions.set(path, revision);
+  }
+
+  baseRevision(path) {
+    return this.baseRevisions.get(path) || 'missing';
+  }
+
+  setBaseContent(path, content) { this.baseContents.set(path, content); }
+  baseContent(path) { return this.baseContents.get(path); }
+
+  forget(path) {
+    this.revisions.delete(path);
+    this.chains.delete(path);
+    this.baseRevisions.delete(path);
+    this.baseContents.delete(path);
+    this.pending.delete(path);
   }
 
   enqueue(path, content) {
     const revision = (this.revisions.get(path) || 0) + 1;
     this.revisions.set(path, revision);
+    this.pending.add(path);
     this.onState('pending');
     const prior = this.chains.get(path) || Promise.resolve();
-    const next = prior.catch(() => {}).then(() => this.writer(path, content, revision)).then((result) => {
+    const next = prior.catch(() => {}).then(() => this.writer(path, content, revision, this.baseRevision(path))).then((result) => {
+      if (result?.contentRevision) { this.setBaseRevision(path, result.contentRevision); this.setBaseContent(path, content); }
       if (this.revisions.get(path) === revision) this.onState('saved', result);
       return result;
     }).catch((error) => {
+      error.path = error.path || path;
+      error.localContent = content;
+      error.baseContent = this.baseContent(path);
       if (this.revisions.get(path) === revision) this.onState('failed', error);
       throw error;
+    }).finally(() => {
+      if (this.revisions.get(path) === revision) this.pending.delete(path);
     });
     this.chains.set(path, next);
     return next;
@@ -297,4 +326,32 @@ export class RevisionQueue {
   waitFor(path) {
     return this.chains.get(path) || Promise.resolve();
   }
+
+  waitForAll() {
+    return Promise.all([...this.pending].map((path) => this.waitFor(path)));
+  }
+
+  pendingPaths() {
+    return [...this.pending].sort();
+  }
+}
+
+function changedRange(base, variant) {
+  const before = base.split('\n'); const after = variant.split('\n');
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start += 1;
+  let end = before.length; let afterEnd = after.length;
+  while (end > start && afterEnd > start && before[end - 1] === after[afterEnd - 1]) { end -= 1; afterEnd -= 1; }
+  return { start, end, replacement: after.slice(start, afterEnd) };
+}
+
+export function mergeMarkdown(base, local, current) {
+  if (local === current) return { status: 'unchanged', content: local };
+  if (local === base) return { status: 'current', content: current };
+  if (current === base) return { status: 'local', content: local };
+  const localChange = changedRange(base, local); const currentChange = changedRange(base, current);
+  if (!(localChange.end <= currentChange.start || currentChange.end <= localChange.start)) return { status: 'conflict', content: null };
+  const lines = base.split('\n');
+  for (const change of [localChange, currentChange].sort((left, right) => right.start - left.start)) lines.splice(change.start, change.end - change.start, ...change.replacement);
+  return { status: 'merged', content: lines.join('\n') };
 }

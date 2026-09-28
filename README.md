@@ -1,9 +1,11 @@
 # Software Schematic
 
+See [Model-driven AI development](docs/unified-project-daemon.md) for the deep interview → live diagram → versioned **plan**/**Play** → sequential build workflow.
+
 Software Schematic is a lightweight, project-local documentation and modeling
 tool for software development. It installs a self-contained browser editor,
 CMMN business context, BPMN design diagrams, Markdown documentation, and a
-query-only MCP graph beside the code that those documents describe.
+project-local MCP workflow beside the code that those documents describe. The AI interviews deeply and proposes small diagram changes; the developer iterates visually, then either clicks Play for the current selection or invokes `plan` with a natural-language diagram target.
 
 Software Schematic is an open-source project owned by Cybling Labs, Inc.
 Cybling Labs also makes the separate [cybling.ai](https://cybling.ai) platform;
@@ -160,6 +162,16 @@ MCP, which atomically publishes a complete graph rooted at `main.cmmn` when the
 refresh is ready. Unreachable diagrams are excluded, and stale connections to
 deleted elements are skipped with warnings rather than blocking the refresh.
 
+Play and the `plan` skill share one planner. It creates semantic-versioned,
+selected-boundary plans under `.ss/workflows/builds/`. A pool authorizes its
+service descendants and downward compositions; a node authorizes its contained
+items, attached events, incident edges, one connected layer, and downward
+compositions. Only `new` and `modify` become work items. The `build` skill lists
+open plans and processes one compare-and-swap claimed item at a time. Generated
+edge/event implementation contracts are stored separately as
+`docs/<element-id>-contract.md`, so justified physical drift never overwrites
+the logical design.
+
 See [AI diagram assistance](docs/ai-diagram-assistant.md),
 [scoped process naming](docs/scoped-process-naming.md), and
 [project-local schematic MCP](docs/software-schematic-mcp.md) for detailed use.
@@ -171,9 +183,11 @@ repository configuration in Codex and start a fresh task if registration has
 just changed. Verify the project identity with `get_project_model` before using
 graph context for development.
 
-The MCP tools are query-only. Human-reviewed diagrams and documentation remain
-the source of truth, and only elements marked `new` or `modify` authorize
-implementation scope.
+Graph query tools remain read-only. Workflow tools may persist bounded plan
+state and claim-bound generated edge/event contracts, but cannot write arbitrary
+paths, mutate the graph directly, execute payloads, or approve proposals.
+Human-reviewed diagrams and documentation remain the logical source of truth,
+and only elements marked `new` or `modify` authorize implementation work.
 
 ## Project layout
 

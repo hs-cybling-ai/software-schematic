@@ -1,5 +1,9 @@
 use crate::{
     Error, Result,
+    delivery_protocol::{
+        CompositionState, DELIVERY_PROTOCOL_VERSION, DesignTarget, GeneratedContractMetadata,
+        GeneratedContractOutput, MAX_DESIGN_TARGETS, SourceManifest, parse_generated_contract,
+    },
     embedding_document::{
         CHUNKER_VERSION, EmbeddingChunk, EmbeddingEnvelope, ParsedMarkdown, body_hash,
         embedding_revision, parse_markdown, validate_envelope_shape,
@@ -75,6 +79,17 @@ pub struct GraphEntity {
     pub implementation_status: Option<ImplementationStatus>,
     pub development_scope_eligible: bool,
     pub markdown: String,
+    pub implementation_contract_markdown: Option<String>,
+    pub implementation_contract: Option<GeneratedContractMetadata>,
+    pub contract_drift: Option<ContractDriftState>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ContractDriftState {
+    Missing,
+    Matching,
+    Differing,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -96,6 +111,7 @@ pub struct DocumentChunk {
     pub content_hash: String,
     pub embedding_model: String,
     pub dimensions: usize,
+    pub document_role: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -109,9 +125,49 @@ pub struct SourceCitation {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
+    pub code: DiagnosticCode,
     pub level: String,
     pub message: String,
     pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DiagnosticCode {
+    GraphStructure,
+    ImplementationContract,
+    EmbeddingHeaderMissing,
+    EmbeddingHeaderMalformed,
+    EmbeddingHeaderStale,
+    EmbeddingHeaderChunkMismatch,
+}
+
+impl DiagnosticCode {
+    pub fn is_vector(self) -> bool {
+        matches!(
+            self,
+            Self::EmbeddingHeaderMissing
+                | Self::EmbeddingHeaderMalformed
+                | Self::EmbeddingHeaderStale
+                | Self::EmbeddingHeaderChunkMismatch
+        )
+    }
+
+    pub fn is_expected_pending(self) -> bool {
+        matches!(
+            self,
+            Self::EmbeddingHeaderMissing | Self::EmbeddingHeaderStale
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum VectorReadiness {
+    NotApplicable,
+    Current,
+    Pending,
+    Degraded,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -146,9 +202,11 @@ pub struct SnapshotSummary {
     pub project_id: String,
     pub root_id: String,
     pub revision: String,
+    pub source_manifest_revision: String,
     pub embedding_revision: String,
     pub retrieval_mode: String,
     pub vector_ready: bool,
+    pub vector_readiness: VectorReadiness,
     pub loaded_at_epoch_ms: u128,
     pub diagrams: usize,
     pub entities: usize,
@@ -195,6 +253,29 @@ pub struct ScopeResult {
     pub context_only: Vec<GraphEntity>,
     pub revision: String,
     pub diagnostic: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanScopeCandidate {
+    pub entity: GraphEntity,
+    pub citation: SourceCitation,
+    pub breadcrumb: String,
+    pub score: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanScopeEnvelope {
+    pub root: GraphEntity,
+    pub targets: Vec<GraphEntity>,
+    pub context_only: Vec<GraphEntity>,
+    pub excluded: Vec<GraphEntity>,
+    pub relations: Vec<GraphRelation>,
+    pub contract_outputs: Vec<GeneratedContractOutput>,
+    pub scope_contract_revision: String,
+    pub revision: String,
+    pub source_manifest_revision: String,
 }
 
 #[derive(Debug, Clone)]
@@ -350,6 +431,7 @@ pub struct GraphSnapshot {
     pub chunks: BTreeMap<String, DocumentChunk>,
     pub source_map: BTreeMap<String, SourceCitation>,
     pub source_hashes: BTreeMap<String, String>,
+    pub source_manifest: SourceManifest,
     pub dependencies: BTreeMap<String, BTreeSet<String>>,
     pub reverse_dependencies: BTreeMap<String, BTreeSet<String>>,
     pub reuse: BuildReuseStats,
@@ -378,6 +460,117 @@ impl std::fmt::Debug for GraphSnapshot {
     }
 }
 
+impl GraphSnapshot {
+    pub fn design_targets(&self) -> Result<(DesignTarget, Vec<DesignTarget>)> {
+        let root_entity = self
+            .entities
+            .get(&self.summary.root_id)
+            .ok_or_else(|| Error::Message("root schematic entity is unavailable".into()))?;
+        let root_source = self.source_map.get(&root_entity.id);
+        let root = DesignTarget {
+            entity_ref: root_entity.id.clone(),
+            source_id: root_entity.source_id.clone(),
+            owner_name: root_entity.owner_name.clone(),
+            name: root_entity.name.clone(),
+            label: root_entity.label.clone(),
+            diagram_path: root_source.map(|source| source.diagram.clone()),
+            composition_state: CompositionState::Existing,
+        };
+
+        let mut diagrams_by_owner = BTreeMap::new();
+        for entity in self
+            .entities
+            .values()
+            .filter(|entity| entity.kind == EntityKind::Diagram && entity.element_type == "bpmn")
+        {
+            diagrams_by_owner.insert(entity.owner_name.clone(), entity);
+        }
+
+        let mut candidates = BTreeMap::<String, (bool, DesignTarget)>::new();
+        for (path, diagram) in &self.parsed_diagrams {
+            if diagram.kind != "cmmn" {
+                continue;
+            }
+            for element in &diagram.elements {
+                if !element
+                    .element_type
+                    .to_ascii_lowercase()
+                    .ends_with("processtask")
+                {
+                    continue;
+                }
+                let Some(name) = element.name.as_ref().or(element.composition.as_ref()) else {
+                    continue;
+                };
+                let existing = diagrams_by_owner.get(name).copied();
+                let anchor = DesignTarget {
+                    entity_ref: urn(
+                        &self.summary.project_id,
+                        "node",
+                        &diagram.owner,
+                        Some(&element.id),
+                    ),
+                    source_id: Some(element.id.clone()),
+                    owner_name: diagram.owner.clone(),
+                    name: Some(name.clone()),
+                    label: if element.label.trim().is_empty() {
+                        name.clone()
+                    } else {
+                        element.label.clone()
+                    },
+                    diagram_path: existing
+                        .and_then(|entity| self.source_map.get(&entity.id))
+                        .map(|source| source.diagram.clone())
+                        .or_else(|| Some(path.clone())),
+                    composition_state: if existing.is_some() {
+                        CompositionState::Existing
+                    } else {
+                        CompositionState::NotCreated
+                    },
+                };
+                let is_occurrence = element.definition_ref.is_some();
+                let key = name.to_ascii_lowercase();
+                if candidates
+                    .get(&key)
+                    .is_none_or(|(prior_occurrence, _)| is_occurrence && !prior_occurrence)
+                {
+                    candidates.insert(key, (is_occurrence, anchor));
+                }
+            }
+        }
+
+        for (owner, entity) in diagrams_by_owner {
+            let key = owner.to_ascii_lowercase();
+            if candidates.contains_key(&key) {
+                continue;
+            }
+            let source = self.source_map.get(&entity.id);
+            candidates.insert(
+                key,
+                (
+                    false,
+                    DesignTarget {
+                        entity_ref: entity.id.clone(),
+                        source_id: entity.source_id.clone(),
+                        owner_name: entity.owner_name.clone(),
+                        name: entity.name.clone(),
+                        label: entity.label.clone(),
+                        diagram_path: source.map(|source| source.diagram.clone()),
+                        composition_state: CompositionState::Existing,
+                    },
+                ),
+            );
+        }
+
+        let process_candidates = candidates
+            .into_values()
+            .map(|(_, target)| target)
+            .take(MAX_DESIGN_TARGETS)
+            .collect();
+        Ok((root, process_candidates))
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ParsedElement {
     id: String,
@@ -389,6 +582,9 @@ struct ParsedElement {
     target: Option<String>,
     definition_ref: Option<String>,
     composition: Option<String>,
+    attached_to: Option<String>,
+    process_ref: Option<String>,
+    parent: Option<String>,
     edge: bool,
 }
 #[derive(Debug, Clone)]
@@ -487,6 +683,7 @@ fn load_schematic_graph_with_previous(
                 } else {
                     skipped_elements.insert((relative.clone(), element.id.clone()));
                     diagnostics.push(Diagnostic {
+                        code: DiagnosticCode::GraphStructure,
                         level: "warning".into(),
                         message: format!(
                             "skipped node {} because referenced composition {name} does not exist",
@@ -515,6 +712,7 @@ fn load_schematic_graph_with_previous(
         .collect();
     for orphan in discovered.difference(&visited) {
         diagnostics.push(Diagnostic {
+            code: DiagnosticCode::GraphStructure,
             level: "info".into(),
             message: "diagram is not reachable from root".into(),
             source: Some(orphan.to_string_lossy().replace('\\', "/")),
@@ -564,6 +762,7 @@ fn load_schematic_graph_with_previous(
                     _ => "target endpoint was skipped".into(),
                 };
                 diagnostics.push(Diagnostic {
+                    code: DiagnosticCode::GraphStructure,
                     level: "warning".into(),
                     message: format!("skipped edge {} because {reason}", element.id),
                     source: Some(relative.to_string_lossy().replace('\\', "/")),
@@ -578,6 +777,8 @@ fn load_schematic_graph_with_previous(
     let mut relations = Vec::new();
     let mut chunks = BTreeMap::new();
     let mut source_map = BTreeMap::new();
+    let mut contract_chunk_sources = BTreeMap::<String, String>::new();
+    let mut contract_documents_seen = BTreeSet::<String>::new();
     let mut source_to_urn = HashMap::new();
     let mut diagram_urns = HashMap::new();
     let mut revision_hasher = Sha256::new();
@@ -612,6 +813,9 @@ fn load_schematic_graph_with_previous(
             implementation_status: None,
             development_scope_eligible: false,
             markdown: markdown.clone(),
+            implementation_contract_markdown: None,
+            implementation_contract: None,
+            contract_drift: None,
         };
         if entities.contains_key(&diagram_id) {
             return Err(Error::Message(format!(
@@ -635,6 +839,7 @@ fn load_schematic_graph_with_previous(
             &options.limits,
             &embedding_name,
             default_dimensions,
+            "logical",
             &mut chunks,
         );
         collect_artifact_vectors(
@@ -643,6 +848,7 @@ fn load_schematic_graph_with_previous(
             &markdown,
             &format!("{}#diagram", relative.to_string_lossy().replace('\\', "/")),
             &diagram_id,
+            "logical",
             &embedding_name,
             embedding_profile_dimensions(&options.embedding),
             &chunks,
@@ -679,6 +885,71 @@ fn load_schematic_graph_with_previous(
                 );
             }
             revision_hasher.update(markdown.as_bytes());
+            let contract_supported =
+                element.edge || element.element_type.to_ascii_lowercase().contains("event");
+            let contract_path = relative
+                .parent()
+                .unwrap_or(Path::new(""))
+                .join("docs")
+                .join(format!("{}-contract.md", element.id));
+            let mut implementation_contract_markdown = None;
+            let mut implementation_contract = None;
+            let mut contract_authored_markdown = None;
+            let mut contract_embedding_envelope = None;
+            let mut contract_embedding_diagnostic = None;
+            let mut contract_drift = contract_supported.then_some(ContractDriftState::Missing);
+            if schematics.join(&contract_path).is_file() {
+                contract_documents_seen.insert(contract_path.to_string_lossy().replace('\\', "/"));
+                if !contract_supported {
+                    diagnostics.push(Diagnostic {
+                        code: DiagnosticCode::ImplementationContract,
+                        level: "warning".into(),
+                        message: format!(
+                            "ignored implementation contract for unsupported owner {}",
+                            element.id
+                        ),
+                        source: Some(contract_path.to_string_lossy().replace('\\', "/")),
+                    });
+                } else {
+                    let physical = fs::read_to_string(schematics.join(&contract_path))?;
+                    let parsed_contract = parse_markdown(&physical);
+                    let authored = parsed_contract.body;
+                    contract_embedding_envelope = parsed_contract.envelope;
+                    contract_embedding_diagnostic = parsed_contract.diagnostic;
+                    match parse_generated_contract(&authored, &project_id) {
+                        Ok((metadata, body)) if metadata.entity_ref == id => {
+                            source_hashes.insert(
+                                contract_path.to_string_lossy().replace('\\', "/"),
+                                short_hash(physical.as_bytes(), 64),
+                            );
+                            revision_hasher.update(physical.as_bytes());
+                            contract_drift = Some(if body.trim() == markdown.trim() {
+                                ContractDriftState::Matching
+                            } else {
+                                ContractDriftState::Differing
+                            });
+                            implementation_contract_markdown = Some(body);
+                            implementation_contract = Some(metadata);
+                            contract_authored_markdown = Some(authored);
+                        }
+                        Ok(_) => diagnostics.push(Diagnostic {
+                            code: DiagnosticCode::ImplementationContract,
+                            level: "warning".into(),
+                            message: format!(
+                                "ignored implementation contract whose entity identity does not match {}",
+                                element.id
+                            ),
+                            source: Some(contract_path.to_string_lossy().replace('\\', "/")),
+                        }),
+                        Err(error) => diagnostics.push(Diagnostic {
+                            code: DiagnosticCode::ImplementationContract,
+                            level: "warning".into(),
+                            message: error,
+                            source: Some(contract_path.to_string_lossy().replace('\\', "/")),
+                        }),
+                    }
+                }
+            }
             let entity = GraphEntity {
                 id: id.clone(),
                 source_id: Some(element.id.clone()),
@@ -694,6 +965,9 @@ fn load_schematic_graph_with_previous(
                 implementation_status: Some(element.status),
                 development_scope_eligible: element.status.eligible(),
                 markdown: markdown.clone(),
+                implementation_contract_markdown: implementation_contract_markdown.clone(),
+                implementation_contract,
+                contract_drift,
             };
             entities.insert(id.clone(), entity);
             source_to_urn.insert((relative.clone(), element.id.clone()), id.clone());
@@ -706,9 +980,15 @@ fn load_schematic_graph_with_previous(
                     source_id: Some(element.id.clone()),
                 },
             );
+            let containment_source = element
+                .parent
+                .as_ref()
+                .and_then(|parent| source_to_urn.get(&(relative.clone(), parent.clone())))
+                .cloned()
+                .unwrap_or_else(|| diagram_id.clone());
             relations.push(GraphRelation {
                 relation_type: "CONTAINS".into(),
-                source: diagram_id.clone(),
+                source: containment_source,
                 target: id.clone(),
             });
             add_chunks(
@@ -718,6 +998,7 @@ fn load_schematic_graph_with_previous(
                 &options.limits,
                 &embedding_name,
                 default_dimensions,
+                "logical",
                 &mut chunks,
             );
             collect_artifact_vectors(
@@ -730,6 +1011,7 @@ fn load_schematic_graph_with_previous(
                     element.id
                 ),
                 &id,
+                "logical",
                 &embedding_name,
                 embedding_profile_dimensions(&options.embedding),
                 &chunks,
@@ -738,6 +1020,65 @@ fn load_schematic_graph_with_previous(
                 &mut diagnostics,
                 &doc_path,
             );
+            if let Some(contract_markdown) = contract_authored_markdown.as_deref() {
+                let prior_chunks = chunks.keys().cloned().collect::<BTreeSet<_>>();
+                add_chunks(
+                    &project_id,
+                    &id,
+                    contract_markdown,
+                    &options.limits,
+                    &embedding_name,
+                    default_dimensions,
+                    "implementationContract",
+                    &mut chunks,
+                );
+                for chunk_id in chunks.keys().filter(|id| !prior_chunks.contains(*id)) {
+                    contract_chunk_sources.insert(
+                        chunk_id.clone(),
+                        contract_path.to_string_lossy().replace('\\', "/"),
+                    );
+                }
+                collect_artifact_vectors(
+                    contract_embedding_envelope,
+                    contract_embedding_diagnostic,
+                    contract_markdown,
+                    &format!(
+                        "{}#{}-contract",
+                        relative.to_string_lossy().replace('\\', "/"),
+                        element.id
+                    ),
+                    &id,
+                    "implementationContract",
+                    &embedding_name,
+                    embedding_profile_dimensions(&options.embedding),
+                    &chunks,
+                    &mut artifact_vectors,
+                    &mut accepted_envelopes,
+                    &mut diagnostics,
+                    &contract_path,
+                );
+            }
+        }
+    }
+    for entry in WalkDir::new(&schematics)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let Ok(relative) = entry.path().strip_prefix(&schematics) else {
+            continue;
+        };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if relative.ends_with("-contract.md") && !contract_documents_seen.contains(&relative) {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::ImplementationContract,
+                level: "warning".into(),
+                message:
+                    "ignored orphan implementation contract with no reachable edge/event owner"
+                        .into(),
+                source: Some(relative),
+            });
         }
     }
     if entities.len() > options.limits.max_entities {
@@ -776,10 +1117,28 @@ fn load_schematic_graph_with_previous(
                 if let Some(target) = diagram_urns.get(&target_path) {
                     relations.push(GraphRelation {
                         relation_type: "COMPOSES_TO".into(),
-                        source: element_urn,
+                        source: element_urn.clone(),
                         target: target.clone(),
                     });
                 }
+            }
+            if let Some(attached_to) = &element.attached_to
+                && let Some(target) = source_to_urn.get(&(relative.clone(), attached_to.clone()))
+            {
+                relations.push(GraphRelation {
+                    relation_type: "ATTACHED_TO".into(),
+                    source: element_urn.clone(),
+                    target: target.clone(),
+                });
+            }
+            if let Some(process_ref) = &element.process_ref
+                && let Some(target) = source_to_urn.get(&(relative.clone(), process_ref.clone()))
+            {
+                relations.push(GraphRelation {
+                    relation_type: "CONTAINS".into(),
+                    source: element_urn,
+                    target: target.clone(),
+                });
             }
         }
     }
@@ -824,10 +1183,11 @@ fn load_schematic_graph_with_previous(
         if let Some(owner) = urn_to_node.get(&chunk.owner_id) {
             db.create_edge(*owner, n, "DOCUMENTED_BY");
         }
-        source_map.insert(
-            chunk.id.clone(),
-            source_map.get(&chunk.owner_id).cloned().unwrap(),
-        );
+        let mut citation = source_map.get(&chunk.owner_id).cloned().unwrap();
+        if let Some(document) = contract_chunk_sources.get(&chunk.id) {
+            citation.document = Some(document.clone());
+        }
+        source_map.insert(chunk.id.clone(), citation);
     }
     for relation in &relations {
         if let (Some(a), Some(b)) = (
@@ -854,9 +1214,22 @@ fn load_schematic_graph_with_previous(
         }
     }
     let revision = format!("sha256:{}", hex(&revision_hasher.finalize()));
+    let source_manifest = build_source_manifest(&schematics)?;
     let envelope_refs = accepted_envelopes.iter().collect::<Vec<_>>();
     let embedding_revision = embedding_revision(&envelope_refs);
     let vector_ready = !chunks.is_empty() && artifact_vectors.len() == chunks.len();
+    let vector_readiness = if chunks.is_empty() {
+        VectorReadiness::NotApplicable
+    } else if vector_ready {
+        VectorReadiness::Current
+    } else if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code.is_vector() && !diagnostic.code.is_expected_pending())
+    {
+        VectorReadiness::Degraded
+    } else {
+        VectorReadiness::Pending
+    };
     let root_id = diagram_urns
         .get(&PathBuf::from("main.cmmn"))
         .cloned()
@@ -866,9 +1239,11 @@ fn load_schematic_graph_with_previous(
         project_id,
         root_id,
         revision,
+        source_manifest_revision: source_manifest.revision.clone(),
         embedding_revision,
         retrieval_mode: if vector_ready { "hybrid" } else { "text" }.into(),
         vector_ready,
+        vector_readiness,
         loaded_at_epoch_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -896,6 +1271,7 @@ fn load_schematic_graph_with_previous(
         chunks,
         source_map,
         source_hashes,
+        source_manifest,
         dependencies,
         reverse_dependencies,
         reuse,
@@ -1111,6 +1487,241 @@ impl GraphSnapshot {
         }
         None
     }
+
+    pub fn resolve_plan_selection(
+        &self,
+        diagram_path: &str,
+        source_id: Option<&str>,
+    ) -> Result<GraphEntity> {
+        let mut matches = self
+            .entities
+            .values()
+            .filter(|entity| {
+                self.source_map
+                    .get(&entity.id)
+                    .is_some_and(|citation| citation.diagram == diagram_path)
+                    && source_id.map_or(entity.kind == EntityKind::Diagram, |source_id| {
+                        entity.source_id.as_deref() == Some(source_id)
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| left.id.cmp(&right.id));
+        match matches.as_slice() {
+            [entity] => Ok(entity.clone()),
+            [] => Err(Error::Message(
+                "selected diagram entity is absent from the published graph".into(),
+            )),
+            _ => Err(Error::Message(
+                "selected diagram identity is ambiguous in its semantic owner".into(),
+            )),
+        }
+    }
+
+    pub fn resolve_plan_intent(
+        &self,
+        language: &str,
+        limit: usize,
+    ) -> Result<Vec<PlanScopeCandidate>> {
+        let query = language.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return Err(Error::Message("describe the diagram scope to plan".into()));
+        }
+        let terms = tokenize(&query);
+        let mut candidates = self
+            .entities
+            .values()
+            .filter(|entity| entity.kind != EntityKind::DocumentChunk)
+            .filter_map(|entity| {
+                let citation = self.source_map.get(&entity.id)?.clone();
+                let haystack = format!(
+                    "{} {} {} {} {}",
+                    entity.label,
+                    entity.name.as_deref().unwrap_or(""),
+                    entity.owner_name,
+                    entity.element_type,
+                    entity.markdown
+                )
+                .to_ascii_lowercase();
+                let exact = entity.label.eq_ignore_ascii_case(language)
+                    || entity
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(language));
+                let term_hits = terms
+                    .iter()
+                    .filter(|term| haystack.contains(term.as_str()))
+                    .count();
+                if !exact && term_hits == 0 {
+                    return None;
+                }
+                let score = if exact {
+                    10_000
+                } else {
+                    (term_hits * 100) as u32
+                } + u32::from(entity.development_scope_eligible) * 10
+                    + u32::from(haystack.contains(&query));
+                Some(PlanScopeCandidate {
+                    entity: entity.clone(),
+                    breadcrumb: format!("{} › {}", entity.owner_name, citation.diagram),
+                    citation,
+                    score,
+                })
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.entity.id.cmp(&right.entity.id))
+        });
+        candidates.truncate(limit.min(self.limits.max_results));
+        Ok(candidates)
+    }
+
+    pub fn plan_scope(&self, root_id: &str) -> Result<PlanScopeEnvelope> {
+        let root = self.entities.get(root_id).cloned().ok_or_else(|| {
+            Error::Message("plan scope root is not in the published graph".into())
+        })?;
+        let normalized_type = root.element_type.to_ascii_lowercase();
+        let service_boundary = root.kind == EntityKind::Diagram
+            || normalized_type.contains("participant")
+            || normalized_type.contains("pool");
+        let boundary = root.id.clone();
+
+        let mut included = BTreeSet::from([root.id.clone(), boundary.clone()]);
+        let mut frontier = vec![boundary.clone()];
+        while let Some(current) = frontier.pop() {
+            for relation in self.relations.iter().filter(|relation| {
+                relation.source == current
+                    && matches!(relation.relation_type.as_str(), "CONTAINS" | "COMPOSES_TO")
+            }) {
+                if included.insert(relation.target.clone()) {
+                    frontier.push(relation.target.clone());
+                }
+            }
+        }
+
+        if !service_boundary {
+            let focus_nodes = included.clone();
+            for relation in &self.relations {
+                let incident = matches!(relation.relation_type.as_str(), "SOURCE" | "TARGET")
+                    && focus_nodes.contains(&relation.target);
+                let attached = relation.relation_type == "ATTACHED_TO"
+                    && focus_nodes.contains(&relation.target);
+                if incident || attached {
+                    included.insert(relation.source.clone());
+                    for endpoint in self.relations.iter().filter(|endpoint| {
+                        endpoint.source == relation.source
+                            && matches!(endpoint.relation_type.as_str(), "SOURCE" | "TARGET")
+                    }) {
+                        included.insert(endpoint.target.clone());
+                    }
+                }
+            }
+            if root.kind == EntityKind::DiagramEdge {
+                for relation in self.relations.iter().filter(|relation| {
+                    relation.source == root.id
+                        && matches!(relation.relation_type.as_str(), "SOURCE" | "TARGET")
+                }) {
+                    included.insert(relation.target.clone());
+                }
+            }
+        }
+
+        let mut targets = Vec::new();
+        let mut context_only = Vec::new();
+        let mut excluded = Vec::new();
+        for id in &included {
+            let Some(entity) = self.entities.get(id).cloned() else {
+                continue;
+            };
+            if entity.development_scope_eligible {
+                targets.push(entity);
+            } else if entity.implementation_status.is_some() {
+                excluded.push(entity.clone());
+                context_only.push(entity);
+            } else {
+                context_only.push(entity);
+            }
+        }
+        if targets.is_empty() {
+            return Err(Error::Message(
+                "selected scope contains no new or modify implementation targets".into(),
+            ));
+        }
+        if targets.len() >= crate::delivery_protocol::MAX_BUILD_WORK_ITEMS {
+            return Err(Error::Message(
+                "selected scope exceeds the build-plan work-item limit".into(),
+            ));
+        }
+        targets.sort_by(|left, right| left.id.cmp(&right.id));
+        context_only.sort_by(|left, right| left.id.cmp(&right.id));
+        excluded.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut relations = self
+            .relations
+            .iter()
+            .filter(|relation| {
+                included.contains(&relation.source) && included.contains(&relation.target)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        relations.sort_by(|left, right| {
+            (&left.source, &left.relation_type, &left.target).cmp(&(
+                &right.source,
+                &right.relation_type,
+                &right.target,
+            ))
+        });
+        let contract_outputs = targets
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::DiagramEdge
+                    || entity.element_type.to_ascii_lowercase().contains("event")
+            })
+            .filter_map(|entity| {
+                let source_id = entity.source_id.as_ref()?;
+                let citation = self.source_map.get(&entity.id)?;
+                let parent = Path::new(&citation.diagram)
+                    .parent()
+                    .unwrap_or(Path::new(""));
+                Some(GeneratedContractOutput {
+                    entity_ref: entity.id.clone(),
+                    document_path: parent
+                        .join("docs")
+                        .join(format!("{source_id}-contract.md"))
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                })
+            })
+            .collect::<Vec<_>>();
+        let fingerprint = serde_json::to_vec(&(
+            &root.id,
+            targets
+                .iter()
+                .map(|entity| (&entity.id, entity.implementation_status, &entity.markdown))
+                .collect::<Vec<_>>(),
+            context_only
+                .iter()
+                .map(|entity| (&entity.id, entity.implementation_status, &entity.markdown))
+                .collect::<Vec<_>>(),
+            &relations,
+            &contract_outputs,
+        ))
+        .map_err(|error| Error::Message(error.to_string()))?;
+        Ok(PlanScopeEnvelope {
+            root,
+            targets,
+            context_only,
+            excluded,
+            relations,
+            contract_outputs,
+            scope_contract_revision: format!("sha256:{}", hex(&Sha256::digest(fingerprint))),
+            revision: self.summary.revision.clone(),
+            source_manifest_revision: self.summary.source_manifest_revision.clone(),
+        })
+    }
+
     pub fn resolve_scope(
         &self,
         language: &str,
@@ -1315,6 +1926,7 @@ fn collect_artifact_vectors(
     body: &str,
     expected_owner: &str,
     graph_owner_id: &str,
+    document_role: &str,
     expected_model: &str,
     expected_dimensions: Option<usize>,
     chunks: &BTreeMap<String, DocumentChunk>,
@@ -1324,15 +1936,20 @@ fn collect_artifact_vectors(
     source: &Path,
 ) {
     let source = source.to_string_lossy().replace('\\', "/");
-    let reject = |message: String, diagnostics: &mut Vec<Diagnostic>| {
+    let reject = |code: DiagnosticCode, message: String, diagnostics: &mut Vec<Diagnostic>| {
         diagnostics.push(Diagnostic {
+            code,
             level: "warning".into(),
             message,
             source: Some(source.clone()),
         });
     };
     if let Some(message) = parse_diagnostic {
-        reject(message, diagnostics);
+        reject(
+            DiagnosticCode::EmbeddingHeaderMalformed,
+            message,
+            diagnostics,
+        );
         return;
     }
     if body.trim().is_empty() {
@@ -1340,13 +1957,18 @@ fn collect_artifact_vectors(
     }
     let Some(envelope) = envelope else {
         reject(
+            DiagnosticCode::EmbeddingHeaderMissing,
             "embedding header is missing; vector retrieval is pending".into(),
             diagnostics,
         );
         return;
     };
     if let Err(error) = validate_envelope_shape(&envelope) {
-        reject(error.to_string(), diagnostics);
+        reject(
+            DiagnosticCode::EmbeddingHeaderMalformed,
+            error.to_string(),
+            diagnostics,
+        );
         return;
     }
     if envelope.owner != expected_owner
@@ -1355,6 +1977,7 @@ fn collect_artifact_vectors(
         || expected_dimensions.is_some_and(|value| value != envelope.dimensions)
     {
         reject(
+            DiagnosticCode::EmbeddingHeaderStale,
             "embedding header is stale or belongs to another owner/model".into(),
             diagnostics,
         );
@@ -1362,11 +1985,12 @@ fn collect_artifact_vectors(
     }
     let mut owner_chunks = chunks
         .values()
-        .filter(|chunk| chunk.owner_id == graph_owner_id)
+        .filter(|chunk| chunk.owner_id == graph_owner_id && chunk.document_role == document_role)
         .collect::<Vec<_>>();
     owner_chunks.sort_by_key(|chunk| chunk.ordinal);
     if owner_chunks.len() != envelope.chunks.len() {
         reject(
+            DiagnosticCode::EmbeddingHeaderChunkMismatch,
             "embedding header chunk count does not match authored Markdown".into(),
             diagnostics,
         );
@@ -1379,6 +2003,7 @@ fn collect_artifact_vectors(
             || artifact.content_hash != chunk.content_hash
         {
             reject(
+                DiagnosticCode::EmbeddingHeaderChunkMismatch,
                 "embedding header chunks do not match authored Markdown".into(),
                 diagnostics,
             );
@@ -1482,6 +2107,22 @@ fn entity_properties(entity: &GraphEntity) -> Vec<(&'static str, Value)> {
             entity.development_scope_eligible.into(),
         ),
         ("markdown", entity.markdown.clone().into()),
+        (
+            "implementationContractMarkdown",
+            entity
+                .implementation_contract_markdown
+                .clone()
+                .unwrap_or_default()
+                .into(),
+        ),
+        (
+            "contractDrift",
+            entity
+                .contract_drift
+                .map(|state| format!("{state:?}").to_ascii_lowercase())
+                .unwrap_or_default()
+                .into(),
+        ),
     ]
 }
 fn parse_diagram(xml: &str, path: &Path) -> Result<ParsedDiagram> {
@@ -1496,17 +2137,22 @@ fn parse_diagram(xml: &str, path: &Path) -> Result<ParsedDiagram> {
     let mut diagram_id = None;
     let mut owner = None;
     let mut depth = 0usize;
+    let mut element_stack: Vec<Option<String>> = Vec::new();
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
                 depth += 1;
-                parse_xml_element(&e, &mut diagram_id, &mut owner, &mut raw)?;
+                let parent = element_stack.iter().rev().flatten().next().cloned();
+                let parsed = parse_xml_element(&e, &mut diagram_id, &mut owner, &mut raw, parent)?;
+                element_stack.push(parsed);
             }
             Ok(Event::Empty(e)) => {
-                parse_xml_element(&e, &mut diagram_id, &mut owner, &mut raw)?;
+                let parent = element_stack.iter().rev().flatten().next().cloned();
+                parse_xml_element(&e, &mut diagram_id, &mut owner, &mut raw, parent)?;
             }
             Ok(Event::End(_)) => {
                 depth = depth.saturating_sub(1);
+                element_stack.pop();
             }
             Ok(Event::Eof) if depth != 0 => {
                 return Err(Error::Message(format!(
@@ -1566,7 +2212,8 @@ fn parse_xml_element(
     diagram_id: &mut Option<String>,
     owner: &mut Option<String>,
     raw: &mut Vec<ParsedElement>,
-) -> Result<()> {
+    parent: Option<String>,
+) -> Result<Option<String>> {
     let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
     let attributes = attrs(e)?;
     if tag.ends_with("definitions") {
@@ -1585,7 +2232,7 @@ fn parse_xml_element(
             || tag.ends_with("BPMNShape")
             || tag.ends_with("BPMNEdge")
         {
-            return Ok(());
+            return Ok(None);
         }
         let edge = attributes.contains_key("sourceRef")
             || attributes.contains_key("targetRef")
@@ -1603,10 +2250,14 @@ fn parse_xml_element(
             target: attributes.get("targetRef").cloned(),
             definition_ref: attributes.get("definitionRef").cloned(),
             composition: attributes.get("calledElement").cloned(),
+            attached_to: attributes.get("attachedToRef").cloned(),
+            process_ref: attributes.get("processRef").cloned(),
+            parent,
             edge,
         });
+        return Ok(Some(id.clone()));
     }
-    Ok(())
+    Ok(None)
 }
 fn attrs(e: &quick_xml::events::BytesStart<'_>) -> Result<HashMap<String, String>> {
     let mut out = HashMap::new();
@@ -1676,6 +2327,7 @@ fn read_optional_document(root: &Path, relative: &Path, max: usize) -> Result<Pa
         String::from_utf8(bytes).map_err(|_| Error::Message("Markdown must be UTF-8".into()))?;
     Ok(parse_markdown(&physical))
 }
+#[allow(clippy::too_many_arguments)]
 fn add_chunks(
     project: &str,
     owner: &str,
@@ -1683,6 +2335,7 @@ fn add_chunks(
     limits: &GraphLimits,
     model: &str,
     dimensions: usize,
+    document_role: &str,
     out: &mut BTreeMap<String, DocumentChunk>,
 ) {
     for (ordinal, (headings, text)) in
@@ -1691,9 +2344,14 @@ fn add_chunks(
             .enumerate()
     {
         let hash = short_hash(text.as_bytes(), 32);
+        let chunk_namespace = if document_role == "logical" {
+            owner.to_string()
+        } else {
+            format!("{owner}:{document_role}")
+        };
         let id = format!(
             "urn:ssw:{project}:chunk:{}#{hash}:{ordinal}",
-            short_hash(owner.as_bytes(), 16)
+            short_hash(chunk_namespace.as_bytes(), 16)
         );
         out.insert(
             id.clone(),
@@ -1706,6 +2364,7 @@ fn add_chunks(
                 content_hash: hash,
                 embedding_model: model.into(),
                 dimensions,
+                document_role: document_role.into(),
             },
         );
     }
@@ -1756,6 +2415,57 @@ pub fn chunk_markdown(markdown: &str, max: usize, overlap: usize) -> Vec<(Vec<St
     }
     out
 }
+
+fn build_source_manifest(schematics: &Path) -> Result<SourceManifest> {
+    let mut documents = BTreeMap::new();
+    for entry in WalkDir::new(schematics).follow_links(false) {
+        let entry = entry?;
+        if entry.file_type().is_symlink() {
+            return Err(Error::Message(
+                "source manifest does not follow symbolic links".into(),
+            ));
+        }
+        if !entry.file_type().is_file()
+            || !matches!(
+                entry.path().extension().and_then(|value| value.to_str()),
+                Some("bpmn" | "cmmn" | "md")
+            )
+        {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(schematics)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let physical = fs::read(entry.path())?;
+        let authored = if relative.ends_with(".md") {
+            let text = String::from_utf8(physical)
+                .map_err(|_| Error::Message(format!("{relative}: Markdown must be UTF-8")))?;
+            parse_markdown(&text).body.into_bytes()
+        } else {
+            physical
+        };
+        documents.insert(
+            relative,
+            format!("sha256:{}", hex(&Sha256::digest(&authored))),
+        );
+    }
+    let mut digest = Sha256::new();
+    for (path, revision) in &documents {
+        digest.update(path.as_bytes());
+        digest.update([0]);
+        digest.update(revision.as_bytes());
+        digest.update([0]);
+    }
+    Ok(SourceManifest {
+        protocol_version: DELIVERY_PROTOCOL_VERSION.into(),
+        revision: format!("sha256:{}", hex(&digest.finalize())),
+        documents,
+    })
+}
+
 fn urn(project: &str, kind: &str, owner: &str, source: Option<&str>) -> String {
     match source {
         Some(id) => format!("urn:ssw:{project}:{owner}#{id}"),
@@ -1824,6 +2534,27 @@ mod tests {
         )
         .unwrap();
         fs::write(schematics.join("acme/Build/main.bpmn"), r#"<bpmn:definitions xmlns:bpmn="x" xmlns:ssw="y" id="BuildDefs" ssw:processName="acme.Build"><bpmn:process id="Process_1"><bpmn:startEvent id="Start_1"/><bpmn:task id="Task_1" name="Checkout" ssw:architecturalName="acme.Build#checkout" ssw:implementationStatus="modify"/><bpmn:sequenceFlow id="Flow_1" sourceRef="Start_1" targetRef="Task_1"/></bpmn:process></bpmn:definitions>"#).unwrap();
+        let contract_body = "# Implemented flow\nUses the durable order message.";
+        let contract = crate::delivery_protocol::serialize_generated_contract(
+            &crate::delivery_protocol::GeneratedContractMetadata {
+                schema_version: crate::delivery_protocol::GENERATED_CONTRACT_SCHEMA_VERSION.into(),
+                project_id: "project-123".into(),
+                plan_id: "plan-one".into(),
+                scope_ref: "urn:ssw:project-123:acme.Build#Task_1".into(),
+                semantic_version: crate::delivery_protocol::SemanticVersion::new(1, 0, 0),
+                entity_ref: "urn:ssw:project-123:acme.Build#Flow_1".into(),
+                base_graph_revision: "sha256:base".into(),
+                body_hash: format!("{:x}", Sha256::digest(contract_body.as_bytes())),
+            },
+            "project-123",
+            contract_body,
+        )
+        .unwrap();
+        fs::write(
+            schematics.join("acme/Build/docs/Flow_1-contract.md"),
+            contract,
+        )
+        .unwrap();
         fs::write(
             schematics.join("orphan.bpmn"),
             "<definitions id=\"orphan\"/>",
@@ -1853,11 +2584,74 @@ mod tests {
             task.citation.unwrap().document.as_deref(),
             Some("acme/Build/docs/Task_1.md")
         );
+        let exact = graph
+            .resolve_plan_selection("acme/Build/main.bpmn", Some("Task_1"))
+            .unwrap();
+        assert_eq!(exact.id, task.entity.id);
+        assert!(
+            graph
+                .resolve_plan_selection("main.cmmn", Some("Task_1"))
+                .is_err()
+        );
+        let plan_scope = graph.plan_scope(&task.entity.id).unwrap();
+        assert_eq!(
+            plan_scope
+                .targets
+                .iter()
+                .map(|entity| entity.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![task.entity.id.as_str()]
+        );
+        assert!(
+            plan_scope
+                .context_only
+                .iter()
+                .any(|entity| entity.source_id.as_deref() == Some("Flow_1"))
+        );
+        let flow = graph
+            .get_entity(None, Some("acme.Build"), Some("Flow_1"), None)
+            .unwrap();
+        assert_eq!(
+            flow.entity.contract_drift,
+            Some(ContractDriftState::Differing)
+        );
+        assert_eq!(
+            flow.entity.implementation_contract_markdown.as_deref(),
+            Some(contract_body)
+        );
         assert!(
             graph
                 .relations
                 .iter()
                 .any(|r| r.relation_type == "COMPOSES_TO")
+        );
+        let (root, processes) = graph.design_targets().unwrap();
+        assert_eq!(root.diagram_path.as_deref(), Some("main.cmmn"));
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].name.as_deref(), Some("acme.Build"));
+        assert_eq!(processes[0].source_id.as_deref(), Some("Plan_1"));
+        assert_eq!(processes[0].composition_state, CompositionState::Existing);
+        assert_eq!(
+            processes[0].diagram_path.as_deref(),
+            Some("acme/Build/main.bpmn")
+        );
+        assert!(
+            processes
+                .iter()
+                .all(|target| { target.diagram_path.as_deref() != Some("orphan.bpmn") })
+        );
+        let composed_scope = graph.plan_scope(&processes[0].entity_ref).unwrap();
+        assert!(
+            composed_scope
+                .targets
+                .iter()
+                .any(|entity| entity.source_id.as_deref() == Some("Plan_1"))
+        );
+        assert!(
+            composed_scope
+                .targets
+                .iter()
+                .any(|entity| entity.source_id.as_deref() == Some("Task_1"))
         );
         assert!(graph.relations.iter().any(|r| r.relation_type == "TARGET"));
         assert!(
@@ -1914,6 +2708,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn design_targets_include_named_uncreated_processes() {
+        let directory = tempdir().unwrap();
+        fs::create_dir_all(directory.path().join(".ss")).unwrap();
+        fs::write(directory.path().join(".ss/project-id"), "project-123\n").unwrap();
+        let schematics = directory.path().join("schematics");
+        fs::create_dir_all(&schematics).unwrap();
+        fs::write(
+            schematics.join("main.cmmn"),
+            r#"<cmmn:definitions xmlns:cmmn="x" xmlns:ssw="y" id="RootDefs" ssw:packageName="acme"><cmmn:processTask id="Def_1" name="Build" ssw:architecturalName="acme.Build"/><cmmn:planItem id="Plan_1" definitionRef="Def_1"/></cmmn:definitions>"#,
+        )
+        .unwrap();
+
+        let graph =
+            load_schematic_graph(directory.path(), LoadOptions::deterministic_test()).unwrap();
+        let (_, processes) = graph.design_targets().unwrap();
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].source_id.as_deref(), Some("Plan_1"));
+        assert_eq!(processes[0].name.as_deref(), Some("acme.Build"));
+        assert_eq!(processes[0].composition_state, CompositionState::NotCreated);
+        assert_eq!(processes[0].diagram_path.as_deref(), Some("main.cmmn"));
+        assert_eq!(processes[0].entity_ref, "urn:ssw:project-123:acme#Plan_1");
+    }
+
+    #[test]
+    fn participant_scope_does_not_include_a_sibling_service() {
+        let directory = tempdir().unwrap();
+        fs::create_dir_all(directory.path().join(".ss")).unwrap();
+        fs::write(directory.path().join(".ss/project-id"), "project-123\n").unwrap();
+        let schematics = directory.path().join("schematics");
+        fs::create_dir_all(schematics.join("shop/Pools")).unwrap();
+        fs::write(
+            schematics.join("main.cmmn"),
+            r#"<cmmn:definitions xmlns:cmmn="x" xmlns:ssw="y" id="Root" ssw:packageName="shop"><cmmn:processTask id="Pools" ssw:architecturalName="shop.Pools" ssw:implementationStatus="new"/></cmmn:definitions>"#,
+        )
+        .unwrap();
+        fs::write(
+            schematics.join("shop/Pools/main.bpmn"),
+            r#"<bpmn:definitions xmlns:bpmn="x" xmlns:ssw="y" id="Defs" ssw:processName="shop.Pools"><bpmn:process id="Process_A"><bpmn:task id="Task_A" ssw:implementationStatus="new"/></bpmn:process><bpmn:process id="Process_B"><bpmn:task id="Task_B" ssw:implementationStatus="new"/></bpmn:process><bpmn:collaboration id="Collab"><bpmn:participant id="Pool_A" processRef="Process_A"/><bpmn:participant id="Pool_B" processRef="Process_B"/></bpmn:collaboration></bpmn:definitions>"#,
+        )
+        .unwrap();
+        let graph =
+            load_schematic_graph(directory.path(), LoadOptions::deterministic_test()).unwrap();
+        let pool = graph
+            .resolve_plan_selection("shop/Pools/main.bpmn", Some("Pool_A"))
+            .unwrap();
+        let scope = graph.plan_scope(&pool.id).unwrap();
+        assert!(
+            scope
+                .targets
+                .iter()
+                .any(|entity| entity.source_id.as_deref() == Some("Task_A"))
+        );
+        assert!(
+            !scope
+                .targets
+                .iter()
+                .any(|entity| entity.source_id.as_deref() == Some("Task_B"))
+        );
+    }
+
+    #[test]
+    fn natural_plan_resolution_returns_duplicate_labels_deterministically() {
+        let directory = project_with_root(
+            r#"<cmmn:definitions xmlns:cmmn="x" xmlns:ssw="y" id="Root" ssw:packageName="shop"><cmmn:task id="Checkout_A" name="Checkout" ssw:implementationStatus="new"/><cmmn:task id="Checkout_B" name="Checkout" ssw:implementationStatus="modify"/></cmmn:definitions>"#,
+        );
+        let graph =
+            load_schematic_graph(directory.path(), LoadOptions::deterministic_test()).unwrap();
+        let candidates = graph.resolve_plan_intent("Checkout", 8).unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].score, candidates[1].score);
+        assert!(candidates[0].entity.id < candidates[1].entity.id);
+    }
+
     fn project_with_root(xml: &str) -> tempfile::TempDir {
         let directory = tempdir().unwrap();
         fs::create_dir_all(directory.path().join(".ss")).unwrap();
@@ -1921,6 +2789,49 @@ mod tests {
         fs::write(directory.path().join(".ss/project-id"), "fixture\n").unwrap();
         fs::write(directory.path().join("schematics/main.cmmn"), xml).unwrap();
         directory
+    }
+
+    #[test]
+    fn complete_load_produces_a_deterministic_content_addressed_source_manifest() {
+        let project = project_with_root("<definitions id=\"D\"/>");
+        let schematics = project.path().join("schematics");
+        fs::write(schematics.join("main.md"), "# Contract\nStable bytes.\n").unwrap();
+        fs::create_dir_all(schematics.join("docs")).unwrap();
+        fs::write(schematics.join("docs/Empty.md"), "").unwrap();
+
+        let first =
+            load_schematic_graph(project.path(), LoadOptions::deterministic_test()).unwrap();
+        let same = fs::read(schematics.join("main.md")).unwrap();
+        fs::write(schematics.join("main.md"), same).unwrap();
+        let second =
+            load_schematic_graph(project.path(), LoadOptions::deterministic_test()).unwrap();
+
+        assert_eq!(first.source_manifest, second.source_manifest);
+        assert_eq!(first.summary.revision, second.summary.revision);
+        assert_eq!(
+            first.summary.source_manifest_revision,
+            first.source_manifest.revision
+        );
+        assert_eq!(
+            first.source_manifest.protocol_version,
+            DELIVERY_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            first
+                .source_manifest
+                .documents
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["docs/Empty.md", "main.cmmn", "main.md"]
+        );
+        assert!(
+            first
+                .source_manifest
+                .documents
+                .values()
+                .all(|revision| revision.starts_with("sha256:"))
+        );
     }
 
     #[test]
@@ -2010,6 +2921,7 @@ mod tests {
         let graph = load_schematic_graph(project.path(), options).unwrap();
         assert!(graph.summary.vector_ready);
         assert_eq!(graph.summary.retrieval_mode, "hybrid");
+        assert_eq!(graph.summary.vector_readiness, VectorReadiness::Current);
         assert_ne!(graph.summary.embedding_revision, embedding_revision(&[]));
         assert_eq!(fs::read(diagram_path).unwrap(), diagram_before);
     }
@@ -2053,6 +2965,14 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert_eq!(graph.summary.retrieval_mode, "text");
         assert!(!graph.summary.vector_ready);
+        assert_eq!(graph.summary.vector_readiness, VectorReadiness::Pending);
+        assert!(
+            graph
+                .summary
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.code == DiagnosticCode::EmbeddingHeaderMissing })
+        );
     }
 
     #[test]
@@ -2070,9 +2990,34 @@ mod tests {
         let graph = load_schematic_graph(project.path(), options).unwrap();
         assert!(!graph.summary.vector_ready);
         assert_eq!(graph.summary.retrieval_mode, "text");
+        assert_eq!(graph.summary.vector_readiness, VectorReadiness::Pending);
         assert!(graph.summary.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message.contains("stale")
-                || diagnostic.message.contains("another owner/model")
+            diagnostic.code == DiagnosticCode::EmbeddingHeaderStale
+                && (diagnostic.message.contains("stale")
+                    || diagnostic.message.contains("another owner/model"))
+        }));
+    }
+
+    #[test]
+    fn malformed_embedding_header_is_structured_as_degraded_vector_readiness() {
+        let project = project_with_root("<definitions id=\"D\"/>");
+        let physical = format!(
+            "{}not-json{}# Recoverable body\n",
+            crate::embedding_document::HEADER_START,
+            crate::embedding_document::HEADER_END
+        );
+        fs::write(project.path().join("schematics/main.md"), physical).unwrap();
+
+        let graph =
+            load_schematic_graph(project.path(), LoadOptions::deterministic_test()).unwrap();
+
+        assert_eq!(graph.summary.retrieval_mode, "text");
+        assert_eq!(graph.summary.vector_readiness, VectorReadiness::Degraded);
+        assert!(graph.summary.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == DiagnosticCode::EmbeddingHeaderMalformed
+                && diagnostic
+                    .message
+                    .contains("invalid software-schematic embedding header")
         }));
     }
 

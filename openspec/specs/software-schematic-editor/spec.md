@@ -34,7 +34,7 @@ The initialized application SHALL load all browser code, styles, fonts, icons, a
 - **THEN** the complete styled interface and all editing and rendering libraries load from the initialized project
 
 ### Requirement: Tabbed diagram editing
-The diagram column SHALL provide one retained, selectable editor tab per complete canonical `.cmmn` or `.bpmn` path and SHALL use the corresponding bundled modeler to render and edit each diagram. The project's normalized sole root anchor tab SHALL remain open as the navigation entry point and SHALL NOT expose an actionable close control or be removable through the tab-close operation. Every other diagram tab SHALL display a keyboard-accessible `x` close control. Closing a permitted tab SHALL remove that retained editor session and release its UI/modeler resources without changing other open sessions; when an active auxiliary tab closes, the application SHALL select the nearest remaining tab, preferring the next tab and otherwise the previous tab. The application SHALL safely flush queued automatic persistence for the closing tab before releasing it.
+The diagram column SHALL provide one retained, selectable editor tab per complete canonical `.cmmn` or `.bpmn` path and SHALL use the corresponding bundled modeler to render and edit each diagram. The project's normalized sole root anchor tab SHALL remain open as the navigation entry point and SHALL NOT expose an actionable close control or be removable through the tab-close operation. Every other diagram tab SHALL display a keyboard-accessible `x` close control. Closing a permitted tab SHALL remove that retained editor session and release its UI/modeler resources without changing other open sessions; when an active auxiliary tab closes, the application SHALL select the nearest remaining tab, preferring the next tab and otherwise the previous tab. The application SHALL safely flush queued automatic persistence for the closing tab before releasing it, but SHALL NOT wait for queued or processing graph-refresh work to finish.
 
 #### Scenario: Multiple diagrams are opened
 - **WHEN** the user opens supported diagram files with different canonical paths
@@ -50,7 +50,7 @@ The diagram column SHALL provide one retained, selectable editor tab per complet
 
 #### Scenario: Active tab is closed
 - **WHEN** the user activates the `x` on the active tab while other tabs remain
-- **THEN** the application flushes its queued persistence, releases its editor, and activates the next tab or the previous tab when no next tab exists
+- **THEN** the application flushes durable persistence, releases its editor without waiting for graph processing, and activates the next tab or the previous tab when no next tab exists
 
 #### Scenario: Root main diagram is displayed
 - **WHEN** the project root anchor tab is open
@@ -163,7 +163,7 @@ The Markdown panel SHALL show rendered Markdown in read mode and editable Markdo
 - **THEN** the control announces `Edit Markdown` in read mode or `Read Markdown` in edit mode
 
 ### Requirement: Implementation Status
-The SSW editor SHALL let a user assign exactly one Implementation Status of `new`, `locked`, `modify`, or `open` to each eligible BPMN or CMMN node or edge. The statuses SHALL mean, respectively, that development must create the represented work/content, must not change the element, is allowed and expected to change the element, or is context-only and outside implementation scope. An element with no assigned or recognized status SHALL be treated as `open`. Status SHALL guide agents and SHALL NOT prevent manual editing. The editor SHALL persist recognized non-default status as SSW diagram XML metadata, restore it when the diagram reopens, and include status changes in undo/redo, dirty state, and automatic save. Green `new` and orange `modify` elements SHALL be the only eligible development targets; gray `locked` and white `open` elements SHALL remain readable context.
+The SSW editor SHALL let a user assign exactly one Implementation Status of `new`, `locked`, `modify`, or `open` to each eligible BPMN or CMMN node or edge. The statuses SHALL mean, respectively, that development must create the represented work/content, must not change the element, is allowed and expected to change the element, or is context-only and outside implementation scope. An element with no assigned or recognized status SHALL be treated as `open`. Status SHALL guide agents and SHALL NOT prevent manual editing. The editor SHALL persist recognized non-default status as SSW diagram XML metadata, restore every eligible element's status presentation when the diagram is rendered or rerendered without requiring selection, and include status changes in undo/redo, dirty state, and automatic save. Green `new` and orange `modify` elements SHALL be the only eligible development targets; gray `locked` and white `open` elements SHALL remain readable context.
 
 #### Scenario: User selects an eligible element
 - **WHEN** the user selects a BPMN or CMMN node or edge in the active editor
@@ -174,8 +174,12 @@ The SSW editor SHALL let a user assign exactly one Implementation Status of `new
 - **THEN** the model records the status through its command stack, renders it green or orange, marks the diagram dirty, and automatically persists it in diagram XML
 
 #### Scenario: Persisted status is reopened
-- **WHEN** a saved diagram containing `new`, `modify`, or `locked` metadata is closed and reopened
-- **THEN** each eligible element restores the same status, color, and textual meaning
+- **WHEN** a saved BPMN or CMMN diagram containing `new`, `modify`, or `locked` metadata is opened
+- **THEN** every eligible element restores the same status, color, and accessible meaning as part of initial canvas rendering before the user selects or otherwise interacts with an element
+
+#### Scenario: Diagram is rerendered from XML
+- **WHEN** an open tab reimports its BPMN or CMMN XML after a supported reload, rename, conflict-resolution, or revert workflow
+- **THEN** every eligible element's status presentation is rebuilt from the reimported model before further user interaction
 
 #### Scenario: User clears development scope
 - **WHEN** the user changes an element from `new` or `modify` to `open`
@@ -186,11 +190,15 @@ The SSW editor SHALL let a user assign exactly one Implementation Status of `new
 - **THEN** the status control is unavailable and no element status changes
 
 ### Requirement: Status color and non-color presentation
-The editor SHALL render the primary fill of an eligible node green for `new`, grey for `locked`, orange for `modify`, and white for `open`, while preserving BPMN outlines, icons, labels, selection cues, and type semantics. The editor SHALL also expose the status name and LLM meaning in text and accessible labeling so status is not communicated by color alone.
+The editor SHALL render the primary fill of an eligible node green for `new`, grey for `locked`, orange for `modify`, and white for `open` from the first visible rendering of the diagram, while preserving BPMN and CMMN outlines, icons, labels, selection cues, and type semantics. The editor SHALL also expose the status name and LLM meaning in text and accessible labeling so status is not communicated by color alone, including before a node has been selected.
+
+#### Scenario: Diagram opens with persisted status colors
+- **WHEN** a BPMN or CMMN diagram containing eligible nodes with persisted statuses becomes visible
+- **THEN** every node displays the color for its normalized status without requiring a click, selection, focus, or hover
 
 #### Scenario: Node status changes color
 - **WHEN** a user assigns `new`, `locked`, `modify`, or `open` to a node
-- **THEN** its primary fill changes immediately to green, grey, orange, or white respectively while its BPMN type remains recognizable
+- **THEN** its primary fill changes immediately to green, grey, orange, or white respectively while its diagram type remains recognizable
 
 #### Scenario: Status is interpreted without color
 - **WHEN** a user cannot distinguish the node fill colors or navigates with assistive technology
@@ -226,16 +234,57 @@ The Rust server SHALL expose only the project-metadata read, diagram listing, co
 - **WHEN** the server receives a valid typed write request for a confined path
 - **THEN** it writes a temporary sibling and replaces the target with the complete content
 
+### Requirement: Chat-style assistant interaction
+The SSW editor SHALL present each magic-button invocation as a chat-style dialog with a scrollable transcript and a message composer anchored to the bottom of the available dialog viewport. The composer SHALL place a compact send control in its lower corner, keep that control keyboard accessible, and provide an accessible name and tooltip. Activating send or pressing Enter on non-empty input SHALL append the user message, clear the composer immediately, preserve a blank input for the next turn, and display the generated assistant response in the transcript. Shift+Enter SHALL insert a newline, Enter during IME composition SHALL NOT submit, and empty or whitespace-only input SHALL NOT submit. While a conversational response is being generated, the send control SHALL become an accessible stop-generation control.
+
+Completed assistant responses that are eligible to produce changes SHALL expose a labeled `Suggest changes` action beneath the response. A valid structured result SHALL appear inline in the transcript as an outlined `Suggested updates` section containing its grouped changes, assumptions, warnings, a secondary `Continue interview` action, and a prominent `Approve changes` action. The dialog close control SHALL remain available in the header. Icon-only presentation SHALL be limited to conventional send, stop, and close actions and SHALL preserve accessible names, tooltips, focus indication, and sufficient target size.
+
+#### Scenario: User sends from the composer
+- **WHEN** the user activates the send control with a non-empty message
+- **THEN** the message is appended to the transcript, the composer becomes blank and remains available at the bottom, and the assistant response is displayed as the next transcript entry
+
+#### Scenario: User sends with the keyboard
+- **WHEN** the composer contains a non-empty message and the user presses Enter outside an active IME composition
+- **THEN** the editor performs the same submission as the send control
+
+#### Scenario: User enters multiline text
+- **WHEN** the user presses Shift+Enter in the composer
+- **THEN** the editor inserts a newline without submitting the message
+
+#### Scenario: User is composing text with an IME
+- **WHEN** an Enter key event occurs before the active composition is complete
+- **THEN** the editor does not submit the message
+
+#### Scenario: User stops response generation
+- **WHEN** a conversational response is in flight and the user activates the stop-generation control
+- **THEN** the editor cancels the active request, retains the already submitted user message, and returns the composer to a send-ready state without creating a proposal
+
+#### Scenario: Assistant response offers structured generation
+- **WHEN** an eligible conversational response finishes
+- **THEN** a labeled `Suggest changes` action appears beneath that assistant response while the bottom composer remains available
+
+#### Scenario: Structured suggestions are generated
+- **WHEN** the user activates `Suggest changes` and the returned plan passes validation
+- **THEN** an outlined `Suggested updates` section is appended inline with the complete grouped update list and visible `Continue interview` and `Approve changes` actions
+
+#### Scenario: Dialog viewport is constrained
+- **WHEN** the transcript exceeds the available dialog height
+- **THEN** the transcript scrolls independently while the composer remains available at the bottom without obscuring the latest content
+
 ### Requirement: AI assistant palette entry points
-The SSW editor SHALL display a magic assistant action in the context palette of every eligible supported diagram shape node and a magic assistant action in the persistent diagram palette. The node action SHALL open an assistant dialog identified as scoped to that node; the diagram action SHALL open the same dialog identified as scoped to the complete active diagram. Both actions SHALL provide accessible names, tooltips, keyboard operation, focus management, and visible hover/focus states consistent with existing palette controls.
+The SSW editor SHALL display a magic assistant action in the context palette of every eligible supported diagram shape node and a magic assistant action in the persistent diagram palette. The node action SHALL open a new assistant invocation identified as scoped to that node; the diagram action SHALL open a new assistant invocation identified as scoped to the complete active diagram. Every activation SHALL flush relevant edits, initialize the dialog from current persisted scoped values, and clear any transcript, draft proposal, error, request, or phase state left by an earlier invocation. Both actions SHALL provide accessible names, tooltips, keyboard operation, focus management, and visible hover/focus states consistent with existing palette controls.
 
 #### Scenario: User invokes node assistance
 - **WHEN** the user activates the magic action in an eligible node's context palette
-- **THEN** the assistant dialog opens, identifies the node and active composition as its primary scope, and focuses the prompt input
+- **THEN** the assistant dialog opens in interview mode, identifies the node and active composition as its primary scope, shows an empty invocation transcript, and focuses the prompt input
 
 #### Scenario: User invokes diagram assistance
 - **WHEN** the user activates the magic action in the persistent diagram palette
-- **THEN** the assistant dialog opens, identifies the complete active diagram as its scope, and focuses the prompt input
+- **THEN** the assistant dialog opens in interview mode, identifies the complete active diagram as its scope, shows an empty invocation transcript, and focuses the prompt input
+
+#### Scenario: Magic action is invoked after another session
+- **WHEN** the user activates a magic action after closing or completing an earlier assistant invocation
+- **THEN** the dialog starts over from the newly persisted target and diagram values without loading browser-stored conversation state from the earlier invocation
 
 #### Scenario: Unsupported element palette is viewed
 - **WHEN** the current context palette belongs to a connection, label, diagram root, or other unsupported element
@@ -243,7 +292,7 @@ The SSW editor SHALL display a magic assistant action in the context palette of 
 
 #### Scenario: Assistant dialog is dismissed
 - **WHEN** the user cancels or closes the assistant dialog before approving a proposal
-- **THEN** focus returns to the invoking palette control and no diagram or documentation content changes
+- **THEN** focus returns to the invoking palette control, the ephemeral invocation state is discarded, and no diagram or documentation content changes
 
 ### Requirement: CMMN-rooted tabbed editing
 The diagram column SHALL open `main.cmmn` as the retained project-root tab and SHALL open linked BPMN designs as auxiliary tabs. Shared tab controls, breadcrumbs, inspector, Markdown panel, automatic persistence, and save status SHALL operate according to the active diagram type.
@@ -260,11 +309,15 @@ The editor SHALL obtain supported element creation, connection, composition, met
 - **THEN** the editor does not present that action as available and does not mutate the diagram
 
 ### Requirement: CMMN magic actions
-The editor SHALL display the existing diagram-scoped magic action for an active CMMN diagram and the existing node-scoped magic action for eligible CMMN elements. Each action SHALL use the same prompt, preview, approval, rejection, error, and revert experience as BPMN.
+The editor SHALL display the existing diagram-scoped magic action for an active CMMN diagram and the existing node-scoped magic action for eligible CMMN elements. Each action SHALL use the same fresh invocation, interview, explicit suggestion transition, preview, continue-interview, approval, close, error, and revert experience as BPMN.
 
 #### Scenario: User invokes CMMN node magic action
 - **WHEN** a user invokes the magic action on an eligible CMMN Process Task
-- **THEN** the assistant dialog identifies that element and its owning CMMN package as the request scope
+- **THEN** a new interview identifies that element and its owning CMMN package as the request scope and contains no state from an earlier invocation
+
+#### Scenario: CMMN proposal needs more discussion
+- **WHEN** a user continues the interview from a CMMN structured preview
+- **THEN** the preview is invalidated and the current invocation resumes conversational mode without applying changes
 
 ### Requirement: Business context remains navigable
 When a BPMN design is opened from a CMMN Process Task, the editor SHALL retain the originating CMMN tab and SHALL present the two documents as a need-to-design navigation relationship without requiring an intermediate CMMN package diagram.
@@ -274,17 +327,54 @@ When a BPMN design is opened from a CMMN Process Task, the editor SHALL retain t
 - **THEN** both tabs remain available and the user can return directly to the CMMN business context
 
 ### Requirement: Document and graph save status
-The web application SHALL distinguish durable document persistence from derived graph refresh. After a successful diagram or connected Markdown save, it SHALL report whether the running project MCP published a new revision, was not running, or retained its prior revision because refresh failed. A refresh failure SHALL NOT be represented as a document-save failure and SHALL NOT roll back the authored file.
+The web application SHALL distinguish durable document persistence, asynchronous embedding derivation, and derived graph refresh. After a successful diagram or connected Markdown save, it SHALL report whether relevant embeddings are current, queued, processing, stale, or failed and whether graph refresh is queued, processing, published, failed, or unavailable because the MCP is not running. Embedding or graph failure SHALL NOT be represented as a document-save failure and SHALL NOT roll back authored files.
+
+#### Scenario: Markdown save queues derivation
+- **WHEN** connected Markdown saves and its content requires a new embedding artifact
+- **THEN** the application reports the document as saved and embedding derivation as queued without waiting for vector generation
+
+#### Scenario: Graph is usable while vectors are pending
+- **WHEN** the current source revision is published while embedding derivation remains queued or processing
+- **THEN** the application reports graph text retrieval as ready and vector retrieval as pending or degraded
 
 #### Scenario: Save and graph refresh succeed
-- **WHEN** a document saves and the running MCP publishes the replacement graph
-- **THEN** the web application reports that the document is saved and identifies the updated graph revision
+- **WHEN** current embedding artifacts are published and the running MCP imports them
+- **THEN** the application reports current vector readiness and the updated graph artifact identity
 
 #### Scenario: Save succeeds without MCP
 - **WHEN** the document saves but no matching MCP process is running
-- **THEN** the web application reports the document as saved and the graph as not refreshed
+- **THEN** the document remains saved, embedding derivation may continue independently, and the application reports that the graph was not refreshed
+
+#### Scenario: Embedding derivation fails
+- **WHEN** Markdown saves but asynchronous embedding generation fails
+- **THEN** the application reports the document as saved, vector retrieval as degraded, and an actionable derivation diagnostic
 
 #### Scenario: Save succeeds but graph rebuild fails
-- **WHEN** the document saves but the MCP retains its prior graph after a rebuild diagnostic
-- **THEN** the web application reports the document as saved, the graph update as failed, and an actionable diagnostic
+- **WHEN** the graph retains its prior source revision after a refresh failure
+- **THEN** the application reports the document as saved, graph refresh as failed, and an actionable diagnostic
 
+### Requirement: Strong document revisions and conditional writes
+Every typed diagram and Markdown read SHALL return a strong content revision derived from the complete durable content. Every write SHALL provide the revision on which the edit was based and SHALL atomically replace the document only when that expected revision still matches, returning the new content revision on success. Revision correctness SHALL NOT depend on filesystem modification-time granularity or client clocks.
+
+#### Scenario: Conditional save succeeds
+- **WHEN** the editor saves complete content with the current expected revision
+- **THEN** the server atomically persists it and returns a different strong revision for changed content
+
+#### Scenario: Concurrent update wins first
+- **WHEN** another editor or skill has already changed the document after the client's read
+- **THEN** the server rejects the stale write with the expected and current revisions and preserves the newer durable content
+
+### Requirement: Actionable concurrent-edit reconciliation
+When a conditional write conflicts, the editor SHALL preserve the user's unsaved content, load the current durable content, and present semantic choices to compare, retry when non-overlapping, or explicitly choose a version. It SHALL NOT silently use last-writer-wins. Agent-authored coordinated proposals SHALL be regenerated from current revisions unless a deterministic non-overlapping merge of Markdown can be previewed and explicitly approved.
+
+#### Scenario: Diagram XML conflicts
+- **WHEN** a stale diagram write conflicts with a newer durable diagram revision
+- **THEN** the editor preserves the local model, blocks automatic overwrite, identifies the competing revision, and offers reload or an explicitly previewed reapplication path
+
+#### Scenario: Markdown edits do not overlap
+- **WHEN** local and durable Markdown changes can be deterministically merged without overlapping hunks
+- **THEN** the editor may preview the merged document and persists it only after user approval against the current revision
+
+#### Scenario: User resolves conflict in the UI
+- **WHEN** the user selects a resolution that replaces current durable content
+- **THEN** the editor performs a new conditional write against the displayed current revision and records the resolution as a new revision

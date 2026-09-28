@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { architecturalName, cmmnFolderForPackageName, cmmnPathForPackageName, collisionKey, compositionBreadcrumbs, compositionFolderForQualifiedName, compositionIdentity, compositionPathFor, compositionSlug, diagramKind, diagramPathForQualifiedName, documentationPath, implementationStatus, isRootDiagram, NODE_STATUSES, normalizeCompositionPath, normalizeNodeStatus, owningPackageName, packageNameForCmmnPath, projectDocumentTitle, qualifiedMemberName, qualifiedNameForCompositionFolder, qualifiedProcessName, qualifiedSymbolFor, resolveBpmnElementName, resolveCmmnElementName, RevisionQueue, selectProjectAnchor, setArchitecturalName, validateCmmnElementName, validateElementName, validateMemberName, validatePackageName, validateProcessName, validateQualifiedProcessName } from '../src/core.js';
+import { architecturalName, cmmnFolderForPackageName, cmmnPathForPackageName, collisionKey, compositionBreadcrumbs, compositionFolderForQualifiedName, compositionIdentity, compositionPathFor, compositionSlug, diagramKind, diagramPathForQualifiedName, documentationPath, implementationStatus, isRootDiagram, mergeMarkdown, NODE_STATUSES, normalizeCompositionPath, normalizeNodeStatus, owningPackageName, packageNameForCmmnPath, projectDocumentTitle, qualifiedMemberName, qualifiedNameForCompositionFolder, qualifiedProcessName, qualifiedSymbolFor, resolveBpmnElementName, resolveCmmnElementName, RevisionQueue, selectProjectAnchor, setArchitecturalName, validateCmmnElementName, validateElementName, validateMemberName, validatePackageName, validateProcessName, validateQualifiedProcessName } from '../src/core.js';
 
 describe('documentation paths', () => {
   it('maps diagrams and elements to deterministic Markdown', () => {
@@ -128,11 +128,20 @@ describe('architectural names', () => {
 describe('RevisionQueue', () => {
   it('serializes writes and only reports the latest revision saved', async () => {
     const states = [];
-    const writer = vi.fn(async () => ({ graphRefresh: { status: 'updated', activeRevision: 'new' } }));
+    const writer = vi.fn(async (_path, _content, revision) => ({ contentRevision: `sha256:${revision}`, graphRefresh: { status: 'updated', activeRevision: 'new' } }));
     const queue = new RevisionQueue(writer, (state, detail) => states.push([state, detail]));
     await Promise.all([queue.enqueue('main.md', 'one'), queue.enqueue('main.md', 'two')]);
-    expect(writer.mock.calls.map((call) => call.slice(1))).toEqual([['one', 1], ['two', 2]]);
-    expect(states.at(-1)).toEqual(['saved', { graphRefresh: { status: 'updated', activeRevision: 'new' } }]);
+    expect(writer.mock.calls.map((call) => call.slice(1))).toEqual([['one', 1, 'missing'], ['two', 2, 'sha256:1']]);
+    expect(states.at(-1)).toEqual(['saved', { contentRevision: 'sha256:2', graphRefresh: { status: 'updated', activeRevision: 'new' } }]);
+  });
+
+  it('uses a loaded strong revision as the conditional-write precondition', async () => {
+    const writer = vi.fn(async () => ({ contentRevision: 'sha256:new' }));
+    const queue = new RevisionQueue(writer);
+    queue.setBaseRevision('main.cmmn', 'sha256:base');
+    await queue.enqueue('main.cmmn', '<definitions />');
+    expect(writer).toHaveBeenCalledWith('main.cmmn', '<definitions />', 1, 'sha256:base');
+    expect(queue.baseRevision('main.cmmn')).toBe('sha256:new');
   });
   it('allows lifecycle cleanup to await the latest path write', async () => {
     let release;
@@ -143,6 +152,31 @@ describe('RevisionQueue', () => {
     await vi.waitFor(() => expect(writer).toHaveBeenCalledOnce());
     release();
     await waiting;
+  });
+
+  it('reports and awaits every pending document across inactive tabs', async () => {
+    const releases = new Map();
+    const writer = vi.fn((path) => new Promise((resolve) => releases.set(path, resolve)));
+    const queue = new RevisionQueue(writer);
+    queue.enqueue('main.cmmn', '<root />');
+    queue.enqueue('orders/main.bpmn', '<orders />');
+    await vi.waitFor(() => expect(writer).toHaveBeenCalledTimes(2));
+    expect(queue.pendingPaths()).toEqual(['main.cmmn', 'orders/main.bpmn']);
+    const waiting = queue.waitForAll();
+    releases.get('main.cmmn')({ contentRevision: 'sha256:root' });
+    releases.get('orders/main.bpmn')({ contentRevision: 'sha256:orders' });
+    await waiting;
+    expect(queue.pendingPaths()).toEqual([]);
+  });
+});
+
+describe('Markdown reconciliation', () => {
+  it('merges non-overlapping line changes and retains both edits', () => {
+    expect(mergeMarkdown('one\ntwo\nthree', 'ONE\ntwo\nthree', 'one\ntwo\nTHREE')).toEqual({ status: 'merged', content: 'ONE\ntwo\nTHREE' });
+  });
+
+  it('requires manual resolution for overlapping changes', () => {
+    expect(mergeMarkdown('one\ntwo', 'one\nLOCAL', 'one\nCURRENT')).toEqual({ status: 'conflict', content: null });
   });
 });
 
