@@ -40,7 +40,7 @@ On macOS, install ONNX Runtime with `brew install onnxruntime` to generate
 Markdown embeddings. Windows users provide `onnxruntime.dll` beside the
 installed `.ss\bin\ss.exe` for embedding generation.
 
-## Download a release
+## Install a release
 
 Download the [latest stable release](https://github.com/hs-cybling-ai/software-schematic/releases/latest),
 or select a pinned version from [all releases](https://github.com/hs-cybling-ai/software-schematic/releases).
@@ -52,22 +52,27 @@ or select a pinned version from [all releases](https://github.com/hs-cybling-ai/
 | Windows x64 | `software-schematic-vVERSION-x86_64-pc-windows-msvc.zip` |
 
 Download the matching archive and `SHA256SUMS` from the same release. On macOS,
-verify and extract it with:
+replace `VERSION` with the downloaded release version, then verify, extract,
+and initialize a project with:
 
 ```sh
 shasum -a 256 -c SHA256SUMS --ignore-missing
 tar -xzf software-schematic-vVERSION-aarch64-apple-darwin.tar.gz
 cd software-schematic-vVERSION-aarch64-apple-darwin
 ./ss init /path/to/project
+cd /path/to/project
+./ssw
 ```
 
 Replace the target name for an Intel Mac. On Windows PowerShell, verify the
-published digest, extract, and initialize with:
+published digest, extract, initialize, and launch with:
 
 ```powershell
 (Get-FileHash .\software-schematic-vVERSION-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash
 Expand-Archive .\software-schematic-vVERSION-x86_64-pc-windows-msvc.zip
 .\software-schematic-vVERSION-x86_64-pc-windows-msvc\software-schematic-vVERSION-x86_64-pc-windows-msvc\ss.exe init C:\path\to\project
+Set-Location C:\path\to\project
+.\ssw.cmd
 ```
 
 Compare the PowerShell digest with the matching line in `SHA256SUMS`. With the
@@ -84,10 +89,15 @@ Windows SmartScreen may therefore request confirmation before first use.
 Checksums and GitHub attestations verify integrity and build provenance but do
 not replace platform code signing.
 
-After `ss init`, follow the platform wrapper instructions below. Generating or
-backfilling embeddings requires native ONNX Runtime as described under Supported targets. Build
-from source if no archive matches the system or the release needs to be audited
-locally.
+`ss init` creates project-local launchers and does not modify a system-wide
+installation. Run `./ssw` or `.\ssw.cmd` from the initialized project whenever
+you want to open Software Schematic. If Codex or Claude Code is installed, the
+editor uses it after its normal account sign-in; choose or inspect the provider
+with `./ssw auth login` and `./ssw auth status` (use `ssw.cmd` on Windows).
+Generating or backfilling embeddings requires native ONNX Runtime as described
+under Supported targets, but editing diagrams and text-based MCP retrieval do
+not. Build from source if no archive matches the system or the release needs to
+be audited locally.
 
 ## Build and verify from source
 
@@ -105,7 +115,7 @@ new candidate source files:
 ```
 
 The workflow installs exact web dependencies from
-`software-schematic-web/package-lock.json`, runs  web and Rust tests, rebuilds
+`software-schematic-web/package-lock.json`, runs web and Rust tests, rebuilds
 the embedded production web bundle, builds the release CLI, validates OpenSpec,
 checks repository scope and required assets/notices, and smoke-tests `init` and
 non-destructive `update` in temporary projects.

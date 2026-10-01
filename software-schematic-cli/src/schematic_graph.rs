@@ -332,7 +332,13 @@ fn locate_onnx_runtime() -> Option<PathBuf> {
             PathBuf::from("/usr/local/opt/onnxruntime/lib").join(filename),
         ]);
     }
-    if let Some(paths) = std::env::var_os("PATH") {
+    // Windows installations deliberately keep ONNX Runtime beside ss.exe. Do
+    // not load an arbitrary DLL from PATH: hosted runners and developer tools
+    // may expose an incompatible copy whose failed initialization poisons
+    // ONNX Runtime's process-global state.
+    if !cfg!(target_os = "windows")
+        && let Some(paths) = std::env::var_os("PATH")
+    {
         candidates.extend(std::env::split_paths(&paths).map(|path| path.join(filename)));
     }
     candidates.into_iter().find(|path| path.is_file())

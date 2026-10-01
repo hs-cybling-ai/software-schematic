@@ -38,7 +38,7 @@ node --test scripts/release.test.mjs
 The release helper can also validate a matching tag without changing Git:
 
 ```sh
-node scripts/release.mjs metadata --ref v0.1.7
+node scripts/release.mjs metadata --ref v0.2.0
 ```
 
 ## Publish a version
